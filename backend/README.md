@@ -26,7 +26,10 @@ set together. Set `APP_BASE_URL` to the deployed frontend URL and
 default. `COOKIE_SECURE` can explicitly override the cookie setting.
 Set `ADMIN_EMAILS` to a comma-separated list of administrator email addresses.
 Only signed-in users with a matching email can access `GET /api/admin/overview`,
-which returns all users and the total number of posts.
+which returns all users and the total number of posts. Administrators can delete
+other users with `DELETE /api/admin/users/{id}`; deletion cascades to that user's
+posts, comments, votes, and shares. Administrators cannot delete themselves from
+the overview.
 
 Set `SMTP_TLS=none` for a local SMTP server without encryption,
 `SMTP_TLS=starttls` for required STARTTLS (typically `SMTP_PORT=587`), or

@@ -61,6 +61,7 @@ async fn main() -> std::io::Result<()> {
             .service(auth::delete_account)
             .service(auth::logout)
             .service(admin::overview)
+            .service(admin::delete_user)
             .service(posts::list_posts)
             .service(posts::get_post)
             .service(posts::create_post)

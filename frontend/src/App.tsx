@@ -134,6 +134,7 @@ export default function App() {
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null)
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminRefresh, setAdminRefresh] = useState(0)
+  const [deletingUserId, setDeletingUserId] = useState<number | null>(null)
   const [usernameDraft, setUsernameDraft] = useState('')
   const authCheckStarted = useRef(false)
 
@@ -444,6 +445,32 @@ export default function App() {
       setError(reason instanceof Error ? reason.message : 'Unable to delete your account.')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  async function deleteAdminUser(adminUser: AdminOverview['users'][number]) {
+    if (!window.confirm(
+      `Permanently delete @${adminUser.username} and their posts, comments, votes, and shares? This cannot be undone.`,
+    )) return
+
+    setDeletingUserId(adminUser.id)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch(`/api/admin/users/${adminUser.id}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      setAdminOverview((current) => current
+        ? { ...current, users: current.users.filter((item) => item.id !== adminUser.id) }
+        : current)
+      setNotice(`@${adminUser.username} was deleted.`)
+      setAdminRefresh((current) => current + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to delete this user.')
+    } finally {
+      setDeletingUserId(null)
     }
   }
 
@@ -769,6 +796,7 @@ export default function App() {
                                 <th scope="col">Username</th>
                                 <th scope="col">Email</th>
                                 <th scope="col">Joined</th>
+                                <th scope="col"><span className="visually-hidden">Actions</span></th>
                               </tr>
                             </thead>
                             <tbody>
@@ -777,6 +805,15 @@ export default function App() {
                                   <td>@{adminUser.username}</td>
                                   <td>{adminUser.email}</td>
                                   <td>{formatDate(adminUser.created_at)}</td>
+                                  <td className="admin-user-actions">
+                                    <button
+                                      className="danger-button"
+                                      onClick={() => void deleteAdminUser(adminUser)}
+                                      disabled={deletingUserId !== null || adminLoading}
+                                    >
+                                      {deletingUserId === adminUser.id ? 'Deleting…' : 'Delete'}
+                                    </button>
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
