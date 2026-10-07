@@ -94,6 +94,48 @@ fn validate_post(input: &PostInput) -> Result<(), &'static str> {
     Ok(())
 }
 
+enum PostUpdate {
+    Updated(Post),
+    Shared,
+    NotFound,
+}
+
+fn edit_owned_post(
+    connection: &mut PgConnection,
+    post_id: i64,
+    user_id: i64,
+    title: &str,
+    body: &str,
+) -> QueryResult<PostUpdate> {
+    connection.transaction(|connection| {
+        let owned_post = posts::table
+            .filter(posts::id.eq(post_id).and(posts::author_id.eq(user_id)))
+            .select(posts::id)
+            .for_update()
+            .first::<i64>(connection)
+            .optional()?;
+        if owned_post.is_none() {
+            return Ok(PostUpdate::NotFound);
+        }
+        let shared = diesel::select(diesel::dsl::exists(
+            post_shares::table.filter(post_shares::post_id.eq(post_id)),
+        ))
+        .get_result::<bool>(connection)?;
+        if shared {
+            return Ok(PostUpdate::Shared);
+        }
+        let post = diesel::update(posts::table.find(post_id))
+            .set((
+                posts::title.eq(title),
+                posts::body.eq(body),
+                posts::updated_at.eq(Utc::now()),
+            ))
+            .returning(Post::as_returning())
+            .get_result::<Post>(connection)?;
+        Ok(PostUpdate::Updated(post))
+    })
+}
+
 #[get("/api/posts/{id}/shares")]
 pub async fn list_shares(
     pool: web::Data<DbPool>,
@@ -242,6 +284,13 @@ pub async fn share_post(
             if !has_access {
                 return Err(ShareError::NotFound);
             }
+
+            // Serialize sharing with editing so the first share freezes the content.
+            posts::table
+                .find(post_id)
+                .select(posts::id)
+                .for_update()
+                .first::<i64>(connection)?;
 
             let recipient_id = users::table
                 .filter(users::username.eq(&username))
@@ -434,19 +483,9 @@ pub async fn update_post(
     let post_id = post_id.into_inner();
     let title = input.title.trim().to_owned();
     let body = input.body.trim().to_owned();
-    let updated_at = Utc::now();
-
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        diesel::update(posts::table.filter(posts::id.eq(post_id).and(posts::author_id.eq(user_id))))
-            .set((
-                posts::title.eq(title),
-                posts::body.eq(body),
-                posts::updated_at.eq(updated_at),
-            ))
-            .returning(Post::as_returning())
-            .get_result::<Post>(&mut connection)
-            .optional()
+        edit_owned_post(&mut connection, post_id, user_id, &title, &body)
             .map_err(|error| error.to_string())
     })
     .await
@@ -454,8 +493,11 @@ pub async fn update_post(
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
     match result {
-        Some(post) => Ok(HttpResponse::Ok().json(post)),
-        None => Ok(HttpResponse::NotFound().json(serde_json::json!({
+        PostUpdate::Updated(post) => Ok(HttpResponse::Ok().json(post)),
+        PostUpdate::Shared => Ok(HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Shared posts cannot be edited. You can still delete your post."
+        }))),
+        PostUpdate::NotFound => Ok(HttpResponse::NotFound().json(serde_json::json!({
             "error": "Post not found."
         }))),
     }
@@ -494,7 +536,88 @@ pub async fn delete_post(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_username, validate_post, PostInput};
+    use super::*;
+
+    #[test]
+    #[ignore = "requires TEST_DATABASE_URL; all fixtures are rolled back"]
+    fn shared_posts_cannot_be_edited_but_can_be_deleted() {
+        let url = std::env::var("TEST_DATABASE_URL").expect("set TEST_DATABASE_URL");
+        let mut connection = PgConnection::establish(&url).expect("connect to test database");
+        connection.test_transaction::<(), diesel::result::Error, _>(|connection| {
+            let suffix = Utc::now().timestamp_nanos_opt().unwrap().to_string();
+            let mut ids = Vec::new();
+            for name in ["owner", "recipient"] {
+                ids.push(
+                    diesel::insert_into(users::table)
+                        .values((
+                            users::email.eq(format!("{name}-{suffix}@example.com")),
+                            users::username.eq(format!("{name}-{suffix}")),
+                        ))
+                        .returning(users::id)
+                        .get_result::<i64>(connection)?,
+                );
+            }
+            let (owner, recipient) = (ids[0], ids[1]);
+            let post = diesel::insert_into(posts::table)
+                .values(NewPost {
+                    author_id: owner,
+                    title: "Original",
+                    body: "Original body",
+                })
+                .returning(Post::as_returning())
+                .get_result::<Post>(connection)?;
+            assert!(matches!(
+                edit_owned_post(connection, post.id, recipient, "Denied", "Denied")?,
+                PostUpdate::NotFound
+            ));
+            let updated =
+                match edit_owned_post(connection, post.id, owner, "Edited", "Edited body")? {
+                    PostUpdate::Updated(post) => post,
+                    _ => panic!("unshared post should be editable"),
+                };
+            diesel::insert_into(post_shares::table)
+                .values(NewPostShare {
+                    post_id: post.id,
+                    shared_by_user_id: owner,
+                    shared_with_user_id: recipient,
+                })
+                .execute(connection)?;
+            assert!(matches!(
+                edit_owned_post(connection, post.id, owner, "Denied", "Denied")?,
+                PostUpdate::Shared
+            ));
+            let unchanged = posts::table.find(post.id).first::<Post>(connection)?;
+            assert_eq!(unchanged.title, updated.title);
+            assert_eq!(unchanged.body, updated.body);
+            assert_eq!(unchanged.updated_at, updated.updated_at);
+            assert!(matches!(
+                edit_owned_post(connection, post.id, recipient, "Denied", "Denied")?,
+                PostUpdate::NotFound
+            ));
+            assert_eq!(
+                diesel::delete(
+                    posts::table.filter(posts::id.eq(post.id).and(posts::author_id.eq(recipient)))
+                )
+                .execute(connection)?,
+                0
+            );
+            assert_eq!(
+                diesel::delete(
+                    posts::table.filter(posts::id.eq(post.id).and(posts::author_id.eq(owner)))
+                )
+                .execute(connection)?,
+                1
+            );
+            assert_eq!(
+                post_shares::table
+                    .filter(post_shares::post_id.eq(post.id))
+                    .count()
+                    .get_result::<i64>(connection)?,
+                0
+            );
+            Ok(())
+        });
+    }
 
     #[test]
     fn accepts_only_normalized_usernames_for_sharing() {

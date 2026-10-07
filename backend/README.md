@@ -48,6 +48,8 @@ visible post with `GET /api/posts/{id}`, update their own post with
 Titles are limited to 200 characters and both fields must contain non-whitespace
 text. The list and detail endpoints include the owner’s posts and posts
 explicitly shared with the current user; only the owner can edit or delete.
+Once a post has been shared, its content cannot be edited, even by the owner.
+Edit attempts return `409`; the owner can still delete the post.
 Unauthenticated requests receive `401`, while inaccessible or missing posts
 receive `404`.
 

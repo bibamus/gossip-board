@@ -61,6 +61,7 @@ export default function App() {
   const [selectedPost, setSelectedPost] = useState<Post | null>(null)
   const [shares, setShares] = useState<ShareRecipient[]>([])
   const [sharesLoading, setSharesLoading] = useState(false)
+  const [sharesLoadedPostId, setSharesLoadedPostId] = useState<number | null>(null)
   const [shareUsername, setShareUsername] = useState('')
   const [userSuggestions, setUserSuggestions] = useState<UserSuggestion[]>([])
   const [suggestionsLoading, setSuggestionsLoading] = useState(false)
@@ -142,6 +143,7 @@ export default function App() {
   }, [user, feedRefresh])
 
   useEffect(() => {
+    setSharesLoadedPostId(null)
     if (!selectedPost || !user) {
       setShares([])
       return
@@ -155,7 +157,10 @@ export default function App() {
         return response.json() as Promise<ShareRecipient[]>
       })
       .then((result) => {
-        if (!cancelled) setShares(result)
+        if (!cancelled) {
+          setShares(result)
+          setSharesLoadedPostId(selectedPost.id)
+        }
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
@@ -489,14 +494,21 @@ export default function App() {
                 <PostInteractions key={selectedPost.id} postId={selectedPost.id} />
                 {selectedPost.author_id === user.id && (
                   <div className="form-actions detail-actions">
-                    <button className="secondary-button" onClick={() => startEdit(selectedPost)} disabled={submitting}>
-                      Edit post
-                    </button>
+                    {sharesLoadedPostId === selectedPost.id && shares.length === 0 && (
+                      <button className="secondary-button" onClick={() => startEdit(selectedPost)} disabled={submitting}>
+                        Edit post
+                      </button>
+                    )}
                     <button className="danger-button" onClick={() => void deletePost(selectedPost)} disabled={submitting}>
                       Delete post
                     </button>
                   </div>
                 )}
+                {selectedPost.author_id === user.id
+                  && sharesLoadedPostId === selectedPost.id
+                  && shares.length > 0 && (
+                    <p className="post-meta">Shared posts cannot be edited. You can still delete your post.</p>
+                  )}
                 <section className="sharing-section" aria-labelledby="sharing-title">
                   <h3 id="sharing-title">Share this post</h3>
                   <p>Share with someone who already has a Gossip Board account. Anyone with access can share it onward.</p>
