@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    image: gossip-board-backend:local
+    build:
+      context: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-password}@db/postgres}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      APP_ENV: ${APP_ENV:-development}
+      BIND_ADDRESS: 0.0.0.0:8080
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    image: gossip-board-frontend:local
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -40,6 +40,9 @@ async fn main() -> std::io::Result<()> {
         })?;
     drop(connection);
 
+    let bind_address =
+        std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -49,7 +52,7 @@ async fn main() -> std::io::Result<()> {
             .service(auth::current_user)
             .service(auth::logout)
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(bind_address)?
     .run()
     .await
 }
