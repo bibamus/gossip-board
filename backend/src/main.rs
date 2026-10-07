@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod interactions;
 mod models;
 mod posts;
 mod schema;
@@ -59,6 +60,14 @@ async fn main() -> std::io::Result<()> {
             .service(posts::create_post)
             .service(posts::update_post)
             .service(posts::delete_post)
+            .service(posts::list_shares)
+            .service(posts::search_users)
+            .service(posts::share_post)
+            .service(interactions::get_comments)
+            .service(interactions::create_comment)
+            .service(interactions::create_vote)
+            .service(interactions::update_vote)
+            .service(interactions::delete_vote)
     })
     .bind(bind_address)?
     .run()

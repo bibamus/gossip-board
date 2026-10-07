@@ -87,7 +87,7 @@ fn token_hash(token: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn valid_email(email: &str) -> bool {
+pub(crate) fn valid_email(email: &str) -> bool {
     if email.len() > 320 || email.trim() != email || !email.is_ascii() {
         return false;
     }

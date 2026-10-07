@@ -50,3 +50,48 @@ text. The list and detail endpoints include the owner’s posts and posts
 explicitly shared with the current user; only the owner can edit or delete.
 Unauthenticated requests receive `401`, while inaccessible or missing posts
 receive `404`.
+
+Share a post with an existing account by sending `POST /api/posts/{id}/shares`
+with a JSON `username`; sharing uses usernames only. Any user who can view the
+post may share it onward. The post appears in the recipient's visible-post list
+on their next feed refresh. Use
+`GET /api/posts/{id}/shares` to see its recipients. Shares are unique per
+post/recipient; a repeated share returns `409`, a recipient must already have
+an account, and attempts to share with yourself return `400`.
+
+The authenticated `GET /api/users/search?q=...` endpoint returns up to ten
+username matches for autocomplete once the query contains at least two
+characters. The current user is excluded from results. Emails are not used or
+returned by the sharing endpoints.
+
+## Comments and voting
+
+Owners and explicit share recipients can read comments with
+`GET /api/posts/{id}/comments` and add one with
+`POST /api/posts/{id}/comments` using JSON `body`. Comments must contain
+non-whitespace text, appear oldest first, and identify their author by username
+without exposing email addresses.
+
+Use `POST /api/posts/{id}/votes` or `PUT /api/posts/{id}/votes` with JSON
+`value` set to `1` or `-1`. Both atomically create or replace the user's single
+vote, returning `score` (the sum of votes) and `your_vote`. Repeating a vote
+does not increase the score. `GET /api/posts/{id}` now includes those fields
+and `comment_count` alongside the existing post fields.
+
+`DELETE /api/posts/{id}/votes` removes only the current user's vote and returns
+the updated `score` and `your_vote: null`. Clicking the selected upvote or
+downvote button removes the vote; clicking the opposite button changes it.
+
+All interaction endpoints require a valid session (`401`) and access to the
+post (`404` for missing or inaccessible posts). Invalid comments and votes
+return `400`. The detail view provides comment input, voting controls, and
+a discussion refresh button.
+
+Database interaction coverage can be run against a migrated test database
+with `TEST_DATABASE_URL` set:
+
+```powershell
+cargo test database_interactions_enforce_access_and_replace_votes -- --ignored
+```
+
+Fixtures run inside a transaction and are rolled back.

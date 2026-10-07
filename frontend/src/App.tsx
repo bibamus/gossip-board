@@ -1,4 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { readError } from './api'
+import PostInteractions from './PostInteractions'
 
 type User = {
   id: number
@@ -19,14 +21,23 @@ type Post = {
   updated_at: string
 }
 
+type ShareRecipient = {
+  id: number
+  post_id: number
+  shared_by_user_id: number
+  shared_with_user_id: number
+  username: string
+  created_at: string
+}
+
+type UserSuggestion = {
+  id: number
+  username: string
+}
+
 type PostDraft = {
   title: string
   body: string
-}
-
-async function readError(response: Response) {
-  const payload = await response.json().catch(() => null) as { error?: string } | null
-  return payload?.error ?? 'Something went wrong. Please try again.'
 }
 
 function formatDate(value: string) {
@@ -46,7 +57,14 @@ export default function App() {
   const [notice, setNotice] = useState('')
   const [posts, setPosts] = useState<Post[]>([])
   const [postsLoading, setPostsLoading] = useState(false)
+  const [feedRefresh, setFeedRefresh] = useState(0)
   const [selectedPost, setSelectedPost] = useState<Post | null>(null)
+  const [shares, setShares] = useState<ShareRecipient[]>([])
+  const [sharesLoading, setSharesLoading] = useState(false)
+  const [shareUsername, setShareUsername] = useState('')
+  const [userSuggestions, setUserSuggestions] = useState<UserSuggestion[]>([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
+  const [suggestionError, setSuggestionError] = useState('')
   const [editingPost, setEditingPost] = useState<Post | null | undefined>(undefined)
   const [draft, setDraft] = useState<PostDraft>({ title: '', body: '' })
   const authCheckStarted = useRef(false)
@@ -121,7 +139,76 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [user])
+  }, [user, feedRefresh])
+
+  useEffect(() => {
+    if (!selectedPost || !user) {
+      setShares([])
+      return
+    }
+
+    let cancelled = false
+    setSharesLoading(true)
+    void fetch(`/api/posts/${selectedPost.id}/shares`, { credentials: 'same-origin' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await readError(response))
+        return response.json() as Promise<ShareRecipient[]>
+      })
+      .then((result) => {
+        if (!cancelled) setShares(result)
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : 'Unable to load post shares.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSharesLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedPost, user])
+
+  useEffect(() => {
+    const query = shareUsername.trim()
+    setUserSuggestions([])
+    setSuggestionsLoading(false)
+    if (!selectedPost || !user || query.length < 2) {
+      setSuggestionError('')
+      return
+    }
+
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => {
+      setSuggestionsLoading(true)
+      setSuggestionError('')
+      const params = new URLSearchParams({ q: query })
+      void fetch(`/api/users/search?${params}`, {
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(await readError(response))
+          return response.json() as Promise<UserSuggestion[]>
+        })
+        .then(setUserSuggestions)
+        .catch((reason: unknown) => {
+          if (!controller.signal.aborted) {
+            setSuggestionError(reason instanceof Error ? reason.message : 'Unable to search for people.')
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSuggestionsLoading(false)
+        })
+    }, 200)
+
+    return () => {
+      window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [shareUsername, selectedPost, user])
 
   async function requestLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -238,6 +325,31 @@ export default function App() {
     }
   }
 
+  async function sharePost(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedPost) return
+    setSubmitting(true)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch(`/api/posts/${selectedPost.id}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ username: shareUsername }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const recipient = await response.json() as ShareRecipient
+      setShares((current) => [...current, recipient])
+      setShareUsername('')
+      setNotice(`Shared with @${recipient.username}.`)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to share this post.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const isEditing = editingPost !== undefined
 
   return (
@@ -313,7 +425,16 @@ export default function App() {
                 </h1>
               </div>
               {!selectedPost && !isEditing && (
-                <button className="primary-button" onClick={startCreate}>Write a post</button>
+                <div className="form-actions dashboard-actions">
+                  <button
+                    className="quiet-button"
+                    onClick={() => setFeedRefresh((current) => current + 1)}
+                    disabled={postsLoading}
+                  >
+                    {postsLoading ? 'Refreshing…' : 'Refresh feed'}
+                  </button>
+                  <button className="primary-button" onClick={startCreate}>Write a post</button>
+                </div>
               )}
             </div>
 
@@ -340,7 +461,11 @@ export default function App() {
                   disabled={submitting}
                 />
                 <div className="form-actions">
-                  <button className="primary-button" type="submit" disabled={submitting}>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={submitting}
+                  >
                     {submitting ? 'Saving…' : editingPost ? 'Save changes' : 'Publish post'}
                   </button>
                   <button className="quiet-button" type="button" onClick={closeEditor} disabled={submitting}>
@@ -361,6 +486,7 @@ export default function App() {
                 </p>
                 <h2>{selectedPost.title}</h2>
                 <p className="post-body">{selectedPost.body}</p>
+                <PostInteractions key={selectedPost.id} postId={selectedPost.id} />
                 {selectedPost.author_id === user.id && (
                   <div className="form-actions detail-actions">
                     <button className="secondary-button" onClick={() => startEdit(selectedPost)} disabled={submitting}>
@@ -371,6 +497,66 @@ export default function App() {
                     </button>
                   </div>
                 )}
+                <section className="sharing-section" aria-labelledby="sharing-title">
+                  <h3 id="sharing-title">Share this post</h3>
+                  <p>Share with someone who already has a Gossip Board account. Anyone with access can share it onward.</p>
+                  <form className="share-form" onSubmit={sharePost}>
+                    <label className="visually-hidden" htmlFor="share-username">
+                      Recipient username
+                    </label>
+                    <input
+                      id="share-username"
+                      type="text"
+                      autoComplete="off"
+                      required
+                      maxLength={50}
+                      list="recipient-suggestions"
+                      value={shareUsername}
+                      onChange={(event) => setShareUsername(event.target.value)}
+                      placeholder="@username"
+                      disabled={submitting}
+                    />
+                    <datalist id="recipient-suggestions">
+                      {userSuggestions.map((suggestion) => (
+                        <option key={suggestion.id} value={suggestion.username} />
+                      ))}
+                    </datalist>
+                    <button
+                      className="primary-button"
+                      type="submit"
+                      disabled={submitting || sharesLoading}
+                    >
+                      {submitting ? 'Sharing…' : 'Share post'}
+                    </button>
+                  </form>
+                  {suggestionsLoading && (
+                    <p className="post-meta" role="status">Searching usernames…</p>
+                  )}
+                  {suggestionError && <p className="feedback error" role="alert">{suggestionError}</p>}
+                  <div className="share-list">
+                    <h4>Shared with</h4>
+                    {sharesLoading ? (
+                      <p className="post-meta" role="status">Loading recipients…</p>
+                    ) : shares.length > 0 ? (
+                      <ul>
+                        {shares.map((recipient) => (
+                          <li key={recipient.id}>
+                            <span>@{recipient.username}</span>
+                            <span className="post-meta">
+                              {recipient.shared_by_user_id === user.id
+                                ? 'Shared by you'
+                                : recipient.shared_by_user_id === selectedPost.author_id
+                                  ? 'Shared by the author'
+                                  : 'Shared onward'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="post-meta">No one else has access yet.</p>
+                    )}
+                  </div>
+                </section>
               </article>
             ) : postsLoading ? (
               <p className="empty-state" role="status">Loading your posts…</p>
