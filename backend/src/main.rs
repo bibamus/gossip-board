@@ -20,6 +20,8 @@ async fn health() -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    env_logger::init();
+
     let database_url = std::env::var("DATABASE_URL").map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
