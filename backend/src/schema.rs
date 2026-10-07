@@ -9,6 +9,27 @@ diesel::table! {
 }
 
 diesel::table! {
+    magic_link_tokens (id) {
+        id -> BigInt,
+        user_id -> BigInt,
+        token_hash -> Bpchar,
+        expires_at -> Timestamptz,
+        used_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    sessions (id) {
+        id -> BigInt,
+        user_id -> BigInt,
+        session_hash -> Bpchar,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     posts (id) {
         id -> BigInt,
         author_id -> BigInt,
@@ -65,6 +86,8 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(magic_link_tokens -> users (user_id));
+diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(posts -> users (author_id));
 diesel::joinable!(post_shares -> posts (post_id));
 diesel::joinable!(comments -> posts (post_id));
@@ -76,9 +99,11 @@ diesel::joinable!(post_tags -> tags (tag_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     comments,
+    magic_link_tokens,
     post_shares,
     post_tags,
     posts,
+    sessions,
     tags,
     users,
     votes,

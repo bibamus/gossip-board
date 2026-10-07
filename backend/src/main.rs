@@ -1,3 +1,4 @@
+mod auth;
 mod db;
 mod models;
 mod schema;
@@ -43,6 +44,10 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .service(health)
+            .service(auth::request_link)
+            .service(auth::verify_link)
+            .service(auth::current_user)
+            .service(auth::logout)
     })
     .bind(("127.0.0.1", 8080))?
     .run()

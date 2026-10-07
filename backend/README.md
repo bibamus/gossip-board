@@ -13,3 +13,20 @@ pending migrations from `migrations/`. The core migration creates users, posts,
 shares, comments, votes, tags, and post-tag associations, including their
 foreign keys, uniqueness rules, and query indexes. The Actix application state
 exposes the pool for database-backed handlers.
+
+## Magic-link authentication
+
+Run the Vite frontend with `npm run dev` from `frontend/`; its `/api` requests
+are proxied to the backend on port 8080. Without `SMTP_HOST`, local development
+prints the one-time sign-in URL to the backend console. To send email through
+SMTP, configure `SMTP_HOST`, `SMTP_FROM`, and optionally `SMTP_PORT` (default
+587), `SMTP_USERNAME`, and `SMTP_PASSWORD`. The username and password must be
+set together. Set `APP_BASE_URL` to the deployed frontend URL and
+`APP_ENV=production`; production requires SMTP and enables secure cookies by
+default. `COOKIE_SECURE` can explicitly override the cookie setting.
+
+The API provides `POST /api/auth/request-link`, `POST /api/auth/verify`,
+`GET /api/auth/me`, and `POST /api/auth/logout`. Magic links expire after 15
+minutes, are single-use, and are stored only as SHA-256 hashes. Successful
+verification creates a 30-day server-side session with an HttpOnly,
+SameSite=Lax cookie.
