@@ -37,6 +37,7 @@ diesel::table! {
         body -> Text,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        image_data -> Nullable<Text>,
     }
 }
 

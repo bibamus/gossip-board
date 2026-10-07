@@ -1,4 +1,11 @@
-import { type FormEvent, useEffect, useRef, useState } from 'react'
+import {
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import { readError } from './api'
 import PostInteractions from './PostInteractions'
 import TagPicker, { type Tag } from './TagPicker'
@@ -18,6 +25,7 @@ type Post = {
   author_id: number
   title: string
   body: string
+  image_data: string | null
   created_at: string
   updated_at: string
   tags: Tag[]
@@ -41,7 +49,11 @@ type PostDraft = {
   title: string
   body: string
   tags: Tag[]
+  imageData: string
 }
+
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, {
@@ -50,12 +62,43 @@ function formatDate(value: string) {
   }).format(new Date(value))
 }
 
+function readImageFile(file: File) {
+  if (!IMAGE_TYPES.includes(file.type)) {
+    return Promise.reject(new Error('Choose a PNG, JPEG, GIF, or WebP image.'))
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    return Promise.reject(new Error('Images must be 3 MB or smaller.'))
+  }
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Unable to read this image.'))
+        return
+      }
+      resolve(reader.result)
+    }
+    reader.onerror = () => reject(new Error('Unable to read this image.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function pastedImage(data: DataTransfer) {
+  for (const item of Array.from(data.items)) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      return item.getAsFile()
+    }
+  }
+  return Array.from(data.files).find((file) => file.type.startsWith('image/')) ?? null
+}
+
 export default function App() {
   const [email, setEmail] = useState('')
   const [user, setUser] = useState<User | null>(null)
   const [sent, setSent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  const [imageLoading, setImageLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [posts, setPosts] = useState<Post[]>([])
@@ -74,7 +117,7 @@ export default function App() {
   const [suggestionsLoading, setSuggestionsLoading] = useState(false)
   const [suggestionError, setSuggestionError] = useState('')
   const [editingPost, setEditingPost] = useState<Post | null | undefined>(undefined)
-  const [draft, setDraft] = useState<PostDraft>({ title: '', body: '', tags: [] })
+  const [draft, setDraft] = useState<PostDraft>({ title: '', body: '', tags: [], imageData: '' })
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [usernameDraft, setUsernameDraft] = useState('')
   const authCheckStarted = useRef(false)
@@ -359,7 +402,7 @@ export default function App() {
   function startCreate() {
     setSelectedPost(null)
     setEditingPost(null)
-    setDraft({ title: '', body: '', tags: [] })
+    setDraft({ title: '', body: '', tags: [], imageData: '' })
     setError('')
     setNotice('')
   }
@@ -367,7 +410,12 @@ export default function App() {
   function startEdit(post: Post) {
     setSelectedPost(post)
     setEditingPost(post)
-    setDraft({ title: post.title, body: post.body, tags: post.tags })
+    setDraft({
+      title: post.title,
+      body: post.body,
+      tags: post.tags,
+      imageData: post.image_data ?? '',
+    })
     setError('')
     setNotice('')
   }
@@ -375,6 +423,35 @@ export default function App() {
   function closeEditor() {
     setEditingPost(undefined)
     setError('')
+  }
+
+  async function attachImage(file: File) {
+    setError('')
+    setImageLoading(true)
+    try {
+      const imageData = await readImageFile(file)
+      setDraft((current) => ({ ...current, imageData }))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to read this image.')
+    } finally {
+      setImageLoading(false)
+    }
+  }
+
+  function handleImageDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const files = Array.from(event.dataTransfer.files)
+    const file = files.find((candidate) => candidate.type.startsWith('image/'))
+    if (file) void attachImage(file)
+    else if (files.length > 0) setError('Drop an image file to attach it.')
+  }
+
+  function handleImagePaste(event: ReactClipboardEvent<HTMLFormElement>) {
+    const file = pastedImage(event.clipboardData)
+    if (file) {
+      event.preventDefault()
+      void attachImage(file)
+    }
   }
 
   async function savePost(event: FormEvent<HTMLFormElement>) {
@@ -394,6 +471,7 @@ export default function App() {
           title: draft.title,
           body: draft.body,
           tags: draft.tags.map((tag) => tag.name),
+          image_data: draft.imageData,
         }),
       })
       if (!response.ok) throw new Error(await readError(response))
@@ -639,7 +717,7 @@ export default function App() {
             )}
 
             {isEditing ? (
-              <form className="post-form" onSubmit={savePost}>
+              <form className="post-form" onSubmit={savePost} onPaste={handleImagePaste}>
                 <label htmlFor="post-title">Title</label>
                 <input
                   id="post-title"
@@ -667,11 +745,50 @@ export default function App() {
                   placeholder="Tell us what happened…"
                   disabled={submitting}
                 />
+                <div
+                  className="image-attachment"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={handleImageDrop}
+                >
+                  <label className="image-dropzone" htmlFor="post-image">
+                    <strong>Add an image</strong>
+                    <span>
+                      {imageLoading
+                        ? 'Loading image…'
+                        : 'Choose a file, drag it here, or paste an image while writing.'}
+                    </span>
+                    <input
+                      className="visually-hidden"
+                      id="post-image"
+                      type="file"
+                      accept="image/png,image/jpeg,image/gif,image/webp"
+                      disabled={submitting || imageLoading}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0]
+                        if (file) void attachImage(file)
+                        event.target.value = ''
+                      }}
+                    />
+                  </label>
+                  {draft.imageData && (
+                    <div className="image-preview">
+                      <img src={draft.imageData} alt="Image attached to this post" />
+                      <button
+                        className="quiet-button"
+                        type="button"
+                        onClick={() => setDraft((current) => ({ ...current, imageData: '' }))}
+                        disabled={submitting}
+                      >
+                        Remove image
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <div className="form-actions">
                   <button
                     className="primary-button"
                     type="submit"
-                    disabled={submitting || tagsSaving}
+                    disabled={submitting || tagsSaving || imageLoading}
                   >
                     {submitting ? 'Saving…' : editingPost ? 'Save changes' : 'Publish post'}
                   </button>
@@ -692,6 +809,9 @@ export default function App() {
                   {selectedPost.updated_at !== selectedPost.created_at && ' · Edited'}
                 </p>
                 <h2>{selectedPost.title}</h2>
+                {selectedPost.image_data && (
+                  <img className="post-image" src={selectedPost.image_data} alt="" />
+                )}
                 {selectedPost.author_id === user.id && (
                   <TagPicker
                     key={selectedPost.id}
@@ -823,6 +943,9 @@ export default function App() {
                       {' · '}{formatDate(post.created_at)}
                     </span>
                     <strong>{post.title}</strong>
+                    {post.image_data && (
+                      <img className="post-card-image" src={post.image_data} alt="" />
+                    )}
                     <span className="post-preview">{post.body}</span>
                     {post.tags.length > 0 && (
                       <span className="topic-labels" aria-label="Topics">

@@ -390,6 +390,7 @@ mod tests {
                     author_id: owner,
                     title: "Interaction fixture",
                     body: "Content",
+                    image_data: None,
                 })
                 .returning(posts::id)
                 .get_result::<i64>(connection)?;

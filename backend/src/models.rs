@@ -33,6 +33,7 @@ pub struct Post {
     pub body: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub image_data: Option<String>,
 }
 
 #[derive(Insertable, Deserialize)]
@@ -41,6 +42,7 @@ pub struct NewPost<'a> {
     pub author_id: i64,
     pub title: &'a str,
     pub body: &'a str,
+    pub image_data: Option<&'a str>,
 }
 
 #[derive(Debug, Queryable, Selectable, Identifiable, Associations, Serialize)]

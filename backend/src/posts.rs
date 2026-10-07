@@ -33,6 +33,7 @@ pub struct PostInput {
     title: String,
     body: String,
     tags: Option<Vec<String>>,
+    image_data: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -93,7 +94,42 @@ fn validate_post(input: &PostInput) -> Result<(), &'static str> {
     if input.body.trim().is_empty() {
         return Err("Post content cannot be empty.");
     }
+    if let Some(image_data) = input.image_data.as_deref().filter(|data| !data.is_empty()) {
+        if !valid_image_data(image_data) {
+            return Err("Image must be a PNG, JPEG, GIF, or WebP no larger than 3 MB.");
+        }
+    }
     Ok(())
+}
+
+fn valid_image_data(image_data: &str) -> bool {
+    let Some((metadata, encoded)) = image_data.split_once(',') else {
+        return false;
+    };
+    if !matches!(
+        metadata,
+        "data:image/png;base64"
+            | "data:image/jpeg;base64"
+            | "data:image/gif;base64"
+            | "data:image/webp;base64"
+    ) || encoded.is_empty()
+        || encoded.len() % 4 != 0
+    {
+        return false;
+    }
+
+    let encoded = encoded.as_bytes();
+    let padding = encoded
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    padding <= 2
+        && encoded[..encoded.len() - padding]
+            .iter()
+            .copied()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
+        && encoded.len() / 4 * 3 - padding <= 3 * 1024 * 1024
 }
 
 enum PostUpdate {
@@ -107,6 +143,7 @@ fn create_owned_post(
     user_id: i64,
     title: &str,
     body: &str,
+    image_data: Option<&str>,
     tag_names: &[String],
 ) -> QueryResult<TaggedPost> {
     connection.transaction(|connection| {
@@ -115,6 +152,7 @@ fn create_owned_post(
                 author_id: user_id,
                 title,
                 body,
+                image_data,
             })
             .returning(Post::as_returning())
             .get_result::<Post>(connection)?;
@@ -129,6 +167,7 @@ fn edit_owned_post(
     user_id: i64,
     content: Option<(&str, &str)>,
     tag_names: Option<&[String]>,
+    image_data: Option<&str>,
 ) -> QueryResult<PostUpdate> {
     connection.transaction(|connection| {
         let owned_post = posts::table
@@ -147,24 +186,31 @@ fn edit_owned_post(
         if shared && content.is_some() {
             return Ok(PostUpdate::Shared);
         }
-        let post = if let Some((title, body)) = content {
+        if let Some((title, body)) = content {
             diesel::update(posts::table.find(post_id))
                 .set((
                     posts::title.eq(title),
                     posts::body.eq(body),
                     posts::updated_at.eq(Utc::now()),
                 ))
-                .returning(Post::as_returning())
-                .get_result::<Post>(connection)?
+                .execute(connection)?;
         } else {
             diesel::update(posts::table.find(post_id))
                 .set(posts::updated_at.eq(Utc::now()))
-                .returning(Post::as_returning())
-                .get_result::<Post>(connection)?
-        };
+                .execute(connection)?;
+        }
         if let Some(names) = tag_names {
             replace_post_tags(connection, post_id, names)?;
         }
+        if let Some(image_data) = image_data {
+            diesel::update(posts::table.find(post_id))
+                .set(posts::image_data.eq((!image_data.is_empty()).then_some(image_data)))
+                .execute(connection)?;
+        }
+        let post = posts::table
+            .find(post_id)
+            .select(Post::as_select())
+            .first::<Post>(connection)?;
         Ok(PostUpdate::Updated(tagged_post(connection, post)?))
     })
 }
@@ -482,6 +528,7 @@ pub async fn create_post(
     }
     let title = input.title.trim().to_owned();
     let body = input.body.trim().to_owned();
+    let image_data = input.image_data.as_deref().map(str::to_owned);
     let tag_names = match normalize_tags(input.tags.as_deref().unwrap_or_default()) {
         Ok(names) => names,
         Err(error) => {
@@ -491,8 +538,15 @@ pub async fn create_post(
 
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        create_owned_post(&mut connection, user_id, &title, &body, &tag_names)
-            .map_err(|error| error.to_string())
+        create_owned_post(
+            &mut connection,
+            user_id,
+            &title,
+            &body,
+            image_data.as_deref().filter(|data| !data.is_empty()),
+            &tag_names,
+        )
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(actix_web::error::ErrorInternalServerError)?
@@ -519,6 +573,7 @@ pub async fn update_post(
     let post_id = post_id.into_inner();
     let title = input.title.trim().to_owned();
     let body = input.body.trim().to_owned();
+    let image_data = input.image_data.as_deref().map(str::to_owned);
     let tag_names = match input.tags.as_deref().map(normalize_tags).transpose() {
         Ok(names) => names,
         Err(error) => {
@@ -533,6 +588,7 @@ pub async fn update_post(
             user_id,
             Some((&title, &body)),
             tag_names.as_deref(),
+            image_data.as_deref(),
         )
         .map_err(|error| error.to_string())
     })
@@ -576,7 +632,7 @@ pub async fn update_post_tags(
     let post_id = post_id.into_inner();
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        edit_owned_post(&mut connection, post_id, user_id, None, Some(&names))
+        edit_owned_post(&mut connection, post_id, user_id, None, Some(&names), None)
             .map_err(|error| error.to_string())
     })
     .await
@@ -641,16 +697,16 @@ mod tests {
             }
             let (owner, recipient, outsider) = (ids[0], ids[1], ids[2]);
             let names = normalize_tags(&["Office News".to_owned(), "office-news".to_owned(), "Rumors".to_owned()]).unwrap();
-            let tagged = create_owned_post(connection, owner, "Tagged", "Content", &names)?;
+            let tagged = create_owned_post(connection, owner, "Tagged", "Content", None, &names)?;
             assert_eq!(tagged.tags.len(), 2);
             assert_eq!(tagged.tags[0].name, "office news");
             assert_eq!(tagged.tags[0].slug, "office-news");
             let mut hidden_names = names.clone();
             hidden_names.push("private only".to_owned());
-            let second = create_owned_post(connection, outsider, "Hidden", "Private", &hidden_names)?;
+            let second = create_owned_post(connection, outsider, "Hidden", "Private", None, &hidden_names)?;
             assert_eq!(tagged.tags[0].id, second.tags[0].id);
             assert_eq!(tagged.tags[1].id, second.tags[2].id);
-            let untagged = create_owned_post(connection, owner, "Untagged", "Content", &[])?;
+            let untagged = create_owned_post(connection, owner, "Untagged", "Content", None, &[])?;
             assert!(untagged.tags.is_empty());
             assert_eq!(visible_tagged_posts(connection, owner, None)?.len(), 2);
             assert!(!crate::tags::visible_topics(connection, owner)?.iter().any(|tag| tag.name == "private only"));
@@ -661,11 +717,11 @@ mod tests {
             assert!(visible_topics(connection, recipient)?.is_empty());
             assert!(visible_tagged_posts(connection, owner, Some("unknown"))?.is_empty());
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, recipient, None, Some(&[]))?,
+                edit_owned_post(connection, tagged.post.id, recipient, None, Some(&[]), None)?,
                 PostUpdate::NotFound
             ));
             let replacements = normalize_tags(&["Relationships".to_owned()]).unwrap();
-            let updated = match edit_owned_post(connection, tagged.post.id, owner, None, Some(&replacements))? {
+            let updated = match edit_owned_post(connection, tagged.post.id, owner, None, Some(&replacements), None)? {
                 PostUpdate::Updated(post) => post,
                 _ => panic!("unshared topics should be editable"),
             };
@@ -673,14 +729,14 @@ mod tests {
             assert_eq!(updated.tags[0].name, "relationships");
             assert!(visible_tagged_posts(connection, owner, Some("office news"))?.is_empty());
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, owner, Some(("Edited", "Content")), None)?,
+                edit_owned_post(connection, tagged.post.id, owner, Some(("Edited", "Content")), None, None)?,
                 PostUpdate::Updated(post) if post.tags.len() == 1
             ));
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, owner, None, Some(&[]))?,
+                edit_owned_post(connection, tagged.post.id, owner, None, Some(&[]), None)?,
                 PostUpdate::Updated(post) if post.tags.is_empty()
             ));
-            edit_owned_post(connection, tagged.post.id, owner, None, Some(&names))?;
+            edit_owned_post(connection, tagged.post.id, owner, None, Some(&names), None)?;
             diesel::insert_into(post_shares::table)
                 .values(NewPostShare {
                     post_id: tagged.post.id,
@@ -693,20 +749,20 @@ mod tests {
             assert_eq!(shared[0].post.id, tagged.post.id);
             assert_eq!(visible_topics(connection, recipient)?.len(), 2);
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, owner, None, Some(&[]))?,
+                edit_owned_post(connection, tagged.post.id, owner, None, Some(&[]), None)?,
                 PostUpdate::Updated(post) if post.tags.is_empty()
             ));
             assert!(visible_topics(connection, recipient)?.is_empty());
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, recipient, None, Some(&names))?,
+                edit_owned_post(connection, tagged.post.id, recipient, None, Some(&names), None)?,
                 PostUpdate::NotFound
             ));
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, owner, None, Some(&names))?,
+                edit_owned_post(connection, tagged.post.id, owner, None, Some(&names), None)?,
                 PostUpdate::Updated(post) if post.tags.len() == 2 && post.post.title == "Edited"
             ));
             assert!(matches!(
-                edit_owned_post(connection, tagged.post.id, owner, Some(("Denied", "Denied")), Some(&[]))?,
+                edit_owned_post(connection, tagged.post.id, owner, Some(("Denied", "Denied")), Some(&[]), None)?,
                 PostUpdate::Shared
             ));
             let unchanged = posts::table.find(tagged.post.id).first::<Post>(connection)?;
@@ -751,6 +807,7 @@ mod tests {
                     author_id: owner,
                     title: "Original",
                     body: "Original body",
+                    image_data: None,
                 })
                 .returning(Post::as_returning())
                 .get_result::<Post>(connection)?;
@@ -760,7 +817,8 @@ mod tests {
                     post.id,
                     recipient,
                     Some(("Denied", "Denied")),
-                    None
+                    None,
+                    None,
                 )?,
                 PostUpdate::NotFound
             ));
@@ -769,6 +827,7 @@ mod tests {
                 post.id,
                 owner,
                 Some(("Edited", "Edited body")),
+                None,
                 None,
             )? {
                 PostUpdate::Updated(post) => post,
@@ -782,7 +841,14 @@ mod tests {
                 })
                 .execute(connection)?;
             assert!(matches!(
-                edit_owned_post(connection, post.id, owner, Some(("Denied", "Denied")), None)?,
+                edit_owned_post(
+                    connection,
+                    post.id,
+                    owner,
+                    Some(("Denied", "Denied")),
+                    None,
+                    None
+                )?,
                 PostUpdate::Shared
             ));
             let unchanged = posts::table.find(post.id).first::<Post>(connection)?;
@@ -795,7 +861,8 @@ mod tests {
                     post.id,
                     recipient,
                     Some(("Denied", "Denied")),
-                    None
+                    None,
+                    None,
                 )?,
                 PostUpdate::NotFound
             ));
@@ -840,31 +907,60 @@ mod tests {
             title: "A title".to_owned(),
             body: "A story".to_owned(),
             tags: None,
+            image_data: None,
         })
         .is_ok());
         assert!(validate_post(&PostInput {
             title: "  ".to_owned(),
             body: "A story".to_owned(),
             tags: None,
+            image_data: None,
         })
         .is_err());
         assert!(validate_post(&PostInput {
             title: "x".repeat(201),
             body: "A story".to_owned(),
             tags: None,
+            image_data: None,
         })
         .is_err());
         assert!(validate_post(&PostInput {
             title: "é".repeat(200),
             body: "A story".to_owned(),
             tags: None,
+            image_data: None,
         })
         .is_ok());
         assert!(validate_post(&PostInput {
             title: "A title".to_owned(),
             body: "  ".to_owned(),
             tags: None,
+            image_data: None,
         })
         .is_err());
+    }
+
+    #[test]
+    fn validates_post_images() {
+        let valid_image = "data:image/png;base64,aGVsbG8=".to_owned();
+        assert!(validate_post(&PostInput {
+            title: "A title".to_owned(),
+            body: "A story".to_owned(),
+            tags: None,
+            image_data: Some(valid_image),
+        })
+        .is_ok());
+        for image_data in [
+            "data:image/svg+xml;base64,PHN2Zz4=".to_owned(),
+            "data:image/png;base64,not base64".to_owned(),
+        ] {
+            assert!(validate_post(&PostInput {
+                title: "A title".to_owned(),
+                body: "A story".to_owned(),
+                tags: None,
+                image_data: Some(image_data),
+            })
+            .is_err());
+        }
     }
 }

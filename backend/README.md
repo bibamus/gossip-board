@@ -46,8 +46,10 @@ session with an HttpOnly, SameSite=Lax cookie.
 ## Posts
 
 Authenticated users can create posts with `POST /api/posts` using a JSON
-`title` and `body`, list posts visible to them with `GET /api/posts`, fetch one
-visible post with `GET /api/posts/{id}`, update their own post with
+`title` and `body`, and can optionally include `image_data` as a PNG, JPEG, GIF,
+or WebP data URL (maximum 3 MB). The web editor supports file selection,
+drag-and-drop, and pasting an image. List posts visible to them with
+`GET /api/posts`, fetch one visible post with `GET /api/posts/{id}`, update their own post with
 `PUT /api/posts/{id}`, and delete their own post with `DELETE /api/posts/{id}`.
 Titles are limited to 200 characters and both fields must contain non-whitespace
 text. The list and detail endpoints include the owner’s posts and posts

@@ -51,6 +51,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::JsonConfig::default().limit(5 * 1024 * 1024))
             .service(health)
             .service(auth::request_link)
             .service(auth::verify_link)
