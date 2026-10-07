@@ -24,6 +24,24 @@ const MAGIC_LINK_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const SESSION_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const SESSION_COOKIE: &str = "gossip_session";
 
+#[derive(Debug, PartialEq)]
+enum SmtpTls {
+    None,
+    Starttls,
+    Implicit,
+}
+
+impl SmtpTls {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "starttls" => Ok(Self::Starttls),
+            "implicit" => Ok(Self::Implicit),
+            _ => Err("SMTP_TLS must be none, starttls, or implicit".to_owned()),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct RequestLink {
     email: String,
@@ -163,9 +181,15 @@ fn send_magic_link(email: &str, link: &str) -> Result<(), String> {
         .parse::<u16>()
         .map_err(|error| format!("invalid SMTP_PORT: {error}"))?;
 
-    let mut builder = SmtpTransport::relay(&host)
-        .map_err(|error| format!("failed to configure SMTP transport: {error}"))?
-        .port(port);
+    let tls = SmtpTls::parse(&std::env::var("SMTP_TLS").unwrap_or_else(|_| "implicit".to_owned()))?;
+    let mut builder = match tls {
+        SmtpTls::None => SmtpTransport::builder_dangerous(&host),
+        SmtpTls::Starttls => SmtpTransport::starttls_relay(&host)
+            .map_err(|error| format!("failed to configure SMTP transport: {error}"))?,
+        SmtpTls::Implicit => SmtpTransport::relay(&host)
+            .map_err(|error| format!("failed to configure SMTP transport: {error}"))?,
+    }
+    .port(port);
     match (
         std::env::var("SMTP_USERNAME"),
         std::env::var("SMTP_PASSWORD"),
@@ -438,7 +462,16 @@ pub async fn logout(pool: web::Data<DbPool>, request: HttpRequest) -> HttpRespon
 
 #[cfg(test)]
 mod tests {
-    use super::{random_token, token_hash, valid_email};
+    use super::{random_token, token_hash, valid_email, SmtpTls};
+
+    #[test]
+    fn smtp_tls_modes_are_explicit_and_invalid_values_are_rejected() {
+        assert_eq!(SmtpTls::parse("none"), Ok(SmtpTls::None));
+        assert_eq!(SmtpTls::parse("starttls"), Ok(SmtpTls::Starttls));
+        assert_eq!(SmtpTls::parse("implicit"), Ok(SmtpTls::Implicit));
+        assert!(SmtpTls::parse("").is_err());
+        assert!(SmtpTls::parse("true").is_err());
+    }
 
     #[test]
     fn accepts_and_normalizes_common_email_addresses() {

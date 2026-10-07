@@ -79,6 +79,7 @@ are ignored by Git and excluded from image build contexts.
 | `COOKIE_SECURE` | Explicit cookie security override; use secure cookies with HTTPS. |
 | `SMTP_HOST`, `SMTP_FROM` | SMTP server and sender address. |
 | `SMTP_PORT` | SMTP port, default `587`. |
+| `SMTP_TLS` | `none` for local plaintext SMTP, `starttls` for required STARTTLS (usually port `587`), or `implicit` for immediate TLS (usually port `465`). Defaults to `implicit` for compatibility; configure the port explicitly for your server. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | Optional SMTP credentials; set both together. |
 | `BIND_ADDRESS` | Backend listener, default `127.0.0.1:8080` locally and `0.0.0.0:8080` in Docker. |
 
