@@ -75,6 +75,8 @@ export default function App() {
   const [suggestionError, setSuggestionError] = useState('')
   const [editingPost, setEditingPost] = useState<Post | null | undefined>(undefined)
   const [draft, setDraft] = useState<PostDraft>({ title: '', body: '', tags: [] })
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [usernameDraft, setUsernameDraft] = useState('')
   const authCheckStarted = useRef(false)
 
   useEffect(() => {
@@ -287,9 +289,68 @@ export default function App() {
       setUser(null)
       setSent(false)
       setEditingPost(undefined)
+      setSettingsOpen(false)
       setNotice('You have been signed out.')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to sign out.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function toggleSettings() {
+    if (!settingsOpen && user) setUsernameDraft(user.username)
+    setSettingsOpen((current) => !current)
+    setError('')
+    setNotice('')
+    setSelectedPost(null)
+    setEditingPost(undefined)
+  }
+
+  async function updateUsername(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSubmitting(true)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch('/api/auth/me', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ username: usernameDraft }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const result = await response.json() as AuthResponse
+      setUser(result.user)
+      setUsernameDraft(result.user.username)
+      setNotice('Username updated.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to update your username.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function deleteAccount() {
+    if (!window.confirm(
+      'Permanently delete your account? Your posts, comments, votes, and shares will also be deleted. This cannot be undone.',
+    )) return
+
+    setSubmitting(true)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch('/api/auth/me', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      setUser(null)
+      setSettingsOpen(false)
+      setSent(false)
+      setNotice('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to delete your account.')
     } finally {
       setSubmitting(false)
     }
@@ -468,15 +529,67 @@ export default function App() {
               event.preventDefault()
               setSelectedPost(null)
               setEditingPost(undefined)
+              setSettingsOpen(false)
               setNotice('')
             }}>Gossip Board</a>
             <div className="account">
-              <span>{user.email}</span>
+              <span className="account-username">@{user.username}</span>
+              <span className="account-email">{user.email}</span>
+              <button className="quiet-button" onClick={toggleSettings} disabled={submitting}>
+                {settingsOpen ? 'Back to board' : 'Account settings'}
+              </button>
               <button className="quiet-button" onClick={logout} disabled={submitting}>Sign out</button>
             </div>
           </header>
 
           <section className="dashboard-content" aria-labelledby="page-title">
+            {settingsOpen ? (
+              <>
+                <div className="dashboard-heading">
+                  <div>
+                    <p className="eyebrow">Your account</p>
+                    <h1 id="page-title">Account settings</h1>
+                  </div>
+                </div>
+                <form className="post-form" onSubmit={updateUsername}>
+                  <p className="settings-description">
+                    Your username is how other people find you when sharing posts.
+                  </p>
+                  <label htmlFor="account-username">Username</label>
+                  <input
+                    id="account-username"
+                    type="text"
+                    required
+                    maxLength={50}
+                    autoComplete="username"
+                    value={usernameDraft}
+                    onChange={(event) => setUsernameDraft(event.target.value)}
+                    disabled={submitting}
+                  />
+                  <p className="settings-hint">Use up to 50 letters, numbers, dots, hyphens, or underscores.</p>
+                  <div className="form-actions">
+                    <button className="primary-button" type="submit" disabled={submitting}>
+                      {submitting ? 'Saving…' : 'Save username'}
+                    </button>
+                  </div>
+                </form>
+                <section className="danger-zone" aria-labelledby="delete-account-title">
+                  <h2 id="delete-account-title">Delete account</h2>
+                  <p>
+                    Permanently remove your account and all your posts, comments, votes, and shares.
+                    This action cannot be undone.
+                  </p>
+                  <button
+                    className="danger-button"
+                    onClick={() => void deleteAccount()}
+                    disabled={submitting}
+                  >
+                    Delete my account
+                  </button>
+                </section>
+              </>
+            ) : (
+              <>
             <div className="dashboard-heading">
               <div>
                 <p className="eyebrow">Your board</p>
@@ -721,6 +834,8 @@ export default function App() {
                   </button>
                 ))}
               </div>
+            )}
+              </>
             )}
             {notice && !loading && <p className="feedback success" role="status">{notice}</p>}
             {error && <p className="feedback error" role="alert">{error}</p>}

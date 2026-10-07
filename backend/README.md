@@ -34,10 +34,14 @@ TLS-enabled mode outside local development. TLS modes validate certificates
 and do not fall back to plaintext.
 
 The API provides `POST /api/auth/request-link`, `POST /api/auth/verify`,
-`GET /api/auth/me`, and `POST /api/auth/logout`. Magic links expire after 15
-minutes, are single-use, and are stored only as SHA-256 hashes. Successful
-verification creates a 30-day server-side session with an HttpOnly,
-SameSite=Lax cookie.
+`GET /api/auth/me`, `PUT /api/auth/me` to change the current username, and
+`DELETE /api/auth/me` to delete the account. Username changes accept up to 50
+letters, numbers, dots, hyphens, or underscores; names are case-insensitive and
+must be unique. Deleting an account also permanently deletes its posts,
+comments, votes, and shares. `POST /api/auth/logout` revokes the current
+session. Magic links expire after 15 minutes, are single-use, and are stored
+only as SHA-256 hashes. Successful verification creates a 30-day server-side
+session with an HttpOnly, SameSite=Lax cookie.
 
 ## Posts
 

@@ -398,6 +398,38 @@ button.topic-label:hover {
   gap: 0.75rem;
 }
 
+.settings-description,
+.settings-hint {
+  color: #cbd5e1;
+}
+
+.settings-hint {
+  font-size: 0.85rem;
+}
+
+.danger-zone {
+  margin-top: 1.5rem;
+  padding: clamp(1.25rem, 5vw, 2rem);
+  border: 1px solid rgba(251, 113, 133, 0.35);
+  border-radius: 1rem;
+  background: rgba(76, 5, 25, 0.25);
+}
+
+.danger-zone h2 {
+  margin: 0 0 0.75rem;
+  color: #f8fafc;
+  font-size: 1.25rem;
+}
+
+.danger-zone p {
+  color: #cbd5e1;
+  line-height: 1.55;
+}
+
+.danger-zone .danger-button {
+  margin-top: 1rem;
+}
+
 .post-form label {
   margin-top: 0.4rem;
   color: #e2e8f0;
@@ -640,7 +672,7 @@ button.topic-label:hover {
     gap: 0.5rem;
   }
 
-  .account span {
+  .account-email {
     display: none;
   }
 

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use actix_web::{
     cookie::{Cookie, SameSite},
-    get, post, web, HttpRequest, HttpResponse, Responder,
+    delete, get, post, put, web, HttpRequest, HttpResponse, Responder,
 };
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
@@ -52,6 +52,11 @@ pub struct VerifyLink {
     token: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateUsername {
+    username: String,
+}
+
 #[derive(Serialize)]
 struct AuthUser {
     id: i64,
@@ -85,6 +90,19 @@ fn random_token() -> String {
 fn token_hash(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub(crate) fn normalize_username(value: &str) -> Result<String, &'static str> {
+    let username = value.trim().trim_start_matches('@').to_ascii_lowercase();
+    if username.is_empty()
+        || username.len() > 50
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("Enter a valid username.");
+    }
+    Ok(username)
 }
 
 pub(crate) fn valid_email(email: &str) -> bool {
@@ -424,6 +442,83 @@ pub async fn current_user(pool: web::Data<DbPool>, request: HttpRequest) -> Http
     }
 }
 
+#[put("/api/auth/me")]
+pub async fn update_username(
+    pool: web::Data<DbPool>,
+    request: HttpRequest,
+    input: web::Json<UpdateUsername>,
+) -> actix_web::Result<HttpResponse> {
+    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Sign in to change your username."
+        })));
+    };
+    let username = match normalize_username(&input.username) {
+        Ok(username) => username,
+        Err(error) => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": error })));
+        }
+    };
+
+    let result = web::block(move || {
+        let mut connection = pool.get().map_err(|error| error.to_string())?;
+        Ok::<_, String>(
+            diesel::update(users::table.find(user_id))
+                .set(users::username.eq(username))
+                .get_result::<User>(&mut connection),
+        )
+    })
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    match result {
+        Err(error) => Err(actix_web::error::ErrorInternalServerError(error)),
+        Ok(Err(diesel::result::Error::NotFound)) => Ok(HttpResponse::Unauthorized().finish()),
+        Ok(Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        ))) => Ok(HttpResponse::Conflict().json(serde_json::json!({
+            "error": "That username is already in use."
+        }))),
+        Ok(Err(error)) => Err(actix_web::error::ErrorInternalServerError(error)),
+        Ok(Ok(user)) => Ok(HttpResponse::Ok().json(AuthResponse { user: user.into() })),
+    }
+}
+
+#[delete("/api/auth/me")]
+pub async fn delete_account(
+    pool: web::Data<DbPool>,
+    request: HttpRequest,
+) -> actix_web::Result<HttpResponse> {
+    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Sign in to delete your account."
+        })));
+    };
+
+    let result = web::block(move || {
+        let mut connection = pool.get().map_err(|error| error.to_string())?;
+        diesel::delete(users::table.find(user_id))
+            .execute(&mut connection)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    result.map_err(actix_web::error::ErrorInternalServerError)?;
+
+    let mut expired_cookie = Cookie::build(SESSION_COOKIE, "")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(actix_web::cookie::time::Duration::seconds(0));
+    if cookie_secure() {
+        expired_cookie = expired_cookie.secure(true);
+    }
+    Ok(HttpResponse::NoContent()
+        .cookie(expired_cookie.finish())
+        .finish())
+}
+
 pub async fn authenticated_user_id(
     pool: web::Data<DbPool>,
     request: &HttpRequest,
@@ -492,7 +587,7 @@ pub async fn logout(pool: web::Data<DbPool>, request: HttpRequest) -> HttpRespon
 
 #[cfg(test)]
 mod tests {
-    use super::{random_token, token_hash, valid_email, SmtpTls};
+    use super::{normalize_username, random_token, token_hash, valid_email, SmtpTls};
 
     #[test]
     fn smtp_tls_modes_are_explicit_and_invalid_values_are_rejected() {
@@ -522,5 +617,16 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(token_hash(&first).len(), 64);
         assert_ne!(token_hash(&first), first);
+    }
+
+    #[test]
+    fn usernames_are_normalized_and_validated() {
+        assert_eq!(
+            normalize_username("  @Some.Name_1  "),
+            Ok("some.name_1".to_owned())
+        );
+        assert!(normalize_username("").is_err());
+        assert!(normalize_username("invalid name").is_err());
+        assert!(normalize_username(&"a".repeat(51)).is_err());
     }
 }

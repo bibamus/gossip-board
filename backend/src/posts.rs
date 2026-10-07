@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    auth::authenticated_user_id,
+    auth::{authenticated_user_id, normalize_username},
     db::DbPool,
     interactions::{vote_summary, PostDetail},
     models::{NewPost, NewPostShare, Post, PostShare},
@@ -83,19 +83,6 @@ impl From<diesel::result::Error> for ShareError {
     fn from(error: diesel::result::Error) -> Self {
         Self::Database(error)
     }
-}
-
-fn normalize_username(value: &str) -> Result<String, &'static str> {
-    let username = value.trim().trim_start_matches('@').to_ascii_lowercase();
-    if username.is_empty()
-        || username.len() > 50
-        || !username
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err("Enter a valid username.");
-    }
-    Ok(username)
 }
 
 fn validate_post(input: &PostInput) -> Result<(), &'static str> {

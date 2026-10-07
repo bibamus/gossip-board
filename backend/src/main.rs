@@ -55,6 +55,8 @@ async fn main() -> std::io::Result<()> {
             .service(auth::request_link)
             .service(auth::verify_link)
             .service(auth::current_user)
+            .service(auth::update_username)
+            .service(auth::delete_account)
             .service(auth::logout)
             .service(posts::list_posts)
             .service(posts::get_post)
