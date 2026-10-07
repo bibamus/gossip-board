@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { readError } from './api'
 import PostInteractions from './PostInteractions'
+import TagPicker, { type Tag } from './TagPicker'
 
 type User = {
   id: number
@@ -19,6 +20,7 @@ type Post = {
   body: string
   created_at: string
   updated_at: string
+  tags: Tag[]
 }
 
 type ShareRecipient = {
@@ -38,6 +40,7 @@ type UserSuggestion = {
 type PostDraft = {
   title: string
   body: string
+  tags: Tag[]
 }
 
 function formatDate(value: string) {
@@ -58,6 +61,10 @@ export default function App() {
   const [posts, setPosts] = useState<Post[]>([])
   const [postsLoading, setPostsLoading] = useState(false)
   const [feedRefresh, setFeedRefresh] = useState(0)
+  const [topics, setTopics] = useState<Tag[]>([])
+  const [topicFilter, setTopicFilter] = useState('')
+  const [topicsLoading, setTopicsLoading] = useState(false)
+  const [tagsSaving, setTagsSaving] = useState(false)
   const [selectedPost, setSelectedPost] = useState<Post | null>(null)
   const [shares, setShares] = useState<ShareRecipient[]>([])
   const [sharesLoading, setSharesLoading] = useState(false)
@@ -67,7 +74,7 @@ export default function App() {
   const [suggestionsLoading, setSuggestionsLoading] = useState(false)
   const [suggestionError, setSuggestionError] = useState('')
   const [editingPost, setEditingPost] = useState<Post | null | undefined>(undefined)
-  const [draft, setDraft] = useState<PostDraft>({ title: '', body: '' })
+  const [draft, setDraft] = useState<PostDraft>({ title: '', body: '', tags: [] })
   const authCheckStarted = useRef(false)
 
   useEffect(() => {
@@ -120,7 +127,9 @@ export default function App() {
 
     let cancelled = false
     setPostsLoading(true)
-    void fetch('/api/posts', { credentials: 'same-origin' })
+    const params = new URLSearchParams()
+    if (topicFilter) params.set('tag', topicFilter)
+    void fetch(`/api/posts?${params}`, { credentials: 'same-origin' })
       .then(async (response) => {
         if (!response.ok) throw new Error(await readError(response))
         return response.json() as Promise<Post[]>
@@ -137,6 +146,35 @@ export default function App() {
         if (!cancelled) setPostsLoading(false)
       })
 
+    return () => {
+      cancelled = true
+    }
+  }, [user, feedRefresh, topicFilter])
+
+  useEffect(() => {
+    if (!user) {
+      setTopics([])
+      setTopicFilter('')
+      return
+    }
+    let cancelled = false
+    setTopicsLoading(true)
+    void fetch('/api/tags', { credentials: 'same-origin' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await readError(response))
+        return response.json() as Promise<Tag[]>
+      })
+      .then((result) => {
+        if (!cancelled) setTopics(result)
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : 'Unable to load topics.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setTopicsLoading(false)
+      })
     return () => {
       cancelled = true
     }
@@ -260,7 +298,7 @@ export default function App() {
   function startCreate() {
     setSelectedPost(null)
     setEditingPost(null)
-    setDraft({ title: '', body: '' })
+    setDraft({ title: '', body: '', tags: [] })
     setError('')
     setNotice('')
   }
@@ -268,7 +306,7 @@ export default function App() {
   function startEdit(post: Post) {
     setSelectedPost(post)
     setEditingPost(post)
-    setDraft({ title: post.title, body: post.body })
+    setDraft({ title: post.title, body: post.body, tags: post.tags })
     setError('')
     setNotice('')
   }
@@ -291,7 +329,11 @@ export default function App() {
         method: isEditing ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify(draft),
+        body: JSON.stringify({
+          title: draft.title,
+          body: draft.body,
+          tags: draft.tags.map((tag) => tag.name),
+        }),
       })
       if (!response.ok) throw new Error(await readError(response))
       const savedPost = await response.json() as Post
@@ -300,6 +342,7 @@ export default function App() {
         : [savedPost, ...current])
       setSelectedPost(savedPost)
       setEditingPost(undefined)
+      setFeedRefresh((current) => current + 1)
       setNotice(isEditing ? 'Post updated.' : 'Post published.')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to save the post.')
@@ -322,12 +365,28 @@ export default function App() {
       setPosts((current) => current.filter((item) => item.id !== post.id))
       setSelectedPost(null)
       setEditingPost(undefined)
+      setFeedRefresh((current) => current + 1)
       setNotice('Post deleted.')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to delete the post.')
     } finally {
       setSubmitting(false)
     }
+  }
+
+  async function updateTopics(tags: Tag[]) {
+    if (!selectedPost) throw new Error('Select a post to change its topics.')
+    const response = await fetch(`/api/posts/${selectedPost.id}/tags`, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags: tags.map((tag) => tag.name) }),
+    })
+    if (!response.ok) throw new Error(await readError(response))
+    const updated = await response.json() as Post
+    setSelectedPost(updated)
+    setPosts((current) => current.map((post) => post.id === updated.id ? updated : post))
+    setFeedRefresh((current) => current + 1)
   }
 
   async function sharePost(event: FormEvent<HTMLFormElement>) {
@@ -443,6 +502,29 @@ export default function App() {
               )}
             </div>
 
+            {!selectedPost && !isEditing && (
+              <div className="topic-filter">
+                <label htmlFor="topic-filter">Filter by topic</label>
+                <select
+                  id="topic-filter"
+                  value={topicFilter}
+                  onChange={(event) => {
+                    setTopicFilter(event.target.value)
+                    setNotice('')
+                  }}
+                  disabled={topicsLoading}
+                >
+                  <option value="">All topics</option>
+                  {topicFilter && !topics.some((tag) => tag.name === topicFilter) && (
+                    <option value={topicFilter}>{topicFilter}</option>
+                  )}
+                  {topics.map((tag) => (
+                    <option key={tag.id} value={tag.name}>{tag.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {isEditing ? (
               <form className="post-form" onSubmit={savePost}>
                 <label htmlFor="post-title">Title</label>
@@ -453,6 +535,13 @@ export default function App() {
                   value={draft.title}
                   onChange={(event) => setDraft({ ...draft, title: event.target.value })}
                   placeholder="What’s the story?"
+                  disabled={submitting}
+                />
+                <TagPicker
+                  value={draft.tags}
+                  suggestions={topics}
+                  onChange={async (tags) => setDraft((current) => ({ ...current, tags }))}
+                  onBusyChange={setTagsSaving}
                   disabled={submitting}
                 />
                 <label htmlFor="post-body">Gossip</label>
@@ -469,11 +558,11 @@ export default function App() {
                   <button
                     className="primary-button"
                     type="submit"
-                    disabled={submitting}
+                    disabled={submitting || tagsSaving}
                   >
                     {submitting ? 'Saving…' : editingPost ? 'Save changes' : 'Publish post'}
                   </button>
-                  <button className="quiet-button" type="button" onClick={closeEditor} disabled={submitting}>
+                  <button className="quiet-button" type="button" onClick={closeEditor} disabled={submitting || tagsSaving}>
                     Cancel
                   </button>
                 </div>
@@ -490,16 +579,43 @@ export default function App() {
                   {selectedPost.updated_at !== selectedPost.created_at && ' · Edited'}
                 </p>
                 <h2>{selectedPost.title}</h2>
+                {selectedPost.author_id === user.id && (
+                  <TagPicker
+                    key={selectedPost.id}
+                    value={selectedPost.tags}
+                    suggestions={topics}
+                    onChange={updateTopics}
+                    onBusyChange={setTagsSaving}
+                    disabled={submitting}
+                  />
+                )}
+                {selectedPost.tags.length > 0 && (
+                  <div className="topic-labels" aria-label="Topics">
+                    {selectedPost.tags.map((tag) => (
+                      <button
+                        className="topic-label"
+                        key={tag.id}
+                        onClick={() => {
+                          setTopicFilter(tag.name)
+                          setSelectedPost(null)
+                          setNotice('')
+                        }}
+                      >
+                        {tag.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <p className="post-body">{selectedPost.body}</p>
                 <PostInteractions key={selectedPost.id} postId={selectedPost.id} />
                 {selectedPost.author_id === user.id && (
                   <div className="form-actions detail-actions">
                     {sharesLoadedPostId === selectedPost.id && shares.length === 0 && (
-                      <button className="secondary-button" onClick={() => startEdit(selectedPost)} disabled={submitting}>
+                      <button className="secondary-button" onClick={() => startEdit(selectedPost)} disabled={submitting || tagsSaving}>
                         Edit post
                       </button>
                     )}
-                    <button className="danger-button" onClick={() => void deletePost(selectedPost)} disabled={submitting}>
+                    <button className="danger-button" onClick={() => void deletePost(selectedPost)} disabled={submitting || tagsSaving}>
                       Delete post
                     </button>
                   </div>
@@ -507,7 +623,7 @@ export default function App() {
                 {selectedPost.author_id === user.id
                   && sharesLoadedPostId === selectedPost.id
                   && shares.length > 0 && (
-                    <p className="post-meta">Shared posts cannot be edited. You can still delete your post.</p>
+                    <p className="post-meta">Shared post content cannot be edited. You can still change topics or delete your post.</p>
                   )}
                 <section className="sharing-section" aria-labelledby="sharing-title">
                   <h3 id="sharing-title">Share this post</h3>
@@ -574,9 +690,13 @@ export default function App() {
               <p className="empty-state" role="status">Loading your posts…</p>
             ) : posts.length === 0 ? (
               <div className="empty-state">
-                <h2>Your board is quiet.</h2>
-                <p>Be the first to share a story.</p>
-                <button className="primary-button" onClick={startCreate}>Write your first post</button>
+                <h2>{topicFilter ? 'No posts in this topic.' : 'Your board is quiet.'}</h2>
+                <p>{topicFilter ? 'Try a different topic or show all posts.' : 'Be the first to share a story.'}</p>
+                {topicFilter ? (
+                  <button className="primary-button" onClick={() => setTopicFilter('')}>Show all topics</button>
+                ) : (
+                  <button className="primary-button" onClick={startCreate}>Write your first post</button>
+                )}
               </div>
             ) : (
               <div className="post-list">
@@ -591,6 +711,13 @@ export default function App() {
                     </span>
                     <strong>{post.title}</strong>
                     <span className="post-preview">{post.body}</span>
+                    {post.tags.length > 0 && (
+                      <span className="topic-labels" aria-label="Topics">
+                        {post.tags.map((tag) => (
+                          <span className="topic-label" key={tag.id}>{tag.name}</span>
+                        ))}
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>

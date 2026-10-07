@@ -9,6 +9,10 @@ use crate::{
     interactions::{vote_summary, PostDetail},
     models::{NewPost, NewPostShare, Post, PostShare},
     schema::{post_shares, posts, users},
+    tags::{
+        normalize_tag, normalize_tags, replace_post_tags, tagged_post, visible_tagged_posts,
+        TaggedPost,
+    },
 };
 
 pub(crate) fn visible_posts(user_id: i64) -> posts::BoxedQuery<'static, diesel::pg::Pg> {
@@ -28,6 +32,17 @@ pub(crate) fn visible_posts(user_id: i64) -> posts::BoxedQuery<'static, diesel::
 pub struct PostInput {
     title: String,
     body: String,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct PostListQuery {
+    tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PostTagsInput {
+    tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -95,17 +110,38 @@ fn validate_post(input: &PostInput) -> Result<(), &'static str> {
 }
 
 enum PostUpdate {
-    Updated(Post),
+    Updated(TaggedPost),
     Shared,
     NotFound,
+}
+
+fn create_owned_post(
+    connection: &mut PgConnection,
+    user_id: i64,
+    title: &str,
+    body: &str,
+    tag_names: &[String],
+) -> QueryResult<TaggedPost> {
+    connection.transaction(|connection| {
+        let post = diesel::insert_into(posts::table)
+            .values(NewPost {
+                author_id: user_id,
+                title,
+                body,
+            })
+            .returning(Post::as_returning())
+            .get_result::<Post>(connection)?;
+        replace_post_tags(connection, post.id, tag_names)?;
+        tagged_post(connection, post)
+    })
 }
 
 fn edit_owned_post(
     connection: &mut PgConnection,
     post_id: i64,
     user_id: i64,
-    title: &str,
-    body: &str,
+    content: Option<(&str, &str)>,
+    tag_names: Option<&[String]>,
 ) -> QueryResult<PostUpdate> {
     connection.transaction(|connection| {
         let owned_post = posts::table
@@ -121,18 +157,28 @@ fn edit_owned_post(
             post_shares::table.filter(post_shares::post_id.eq(post_id)),
         ))
         .get_result::<bool>(connection)?;
-        if shared {
+        if shared && content.is_some() {
             return Ok(PostUpdate::Shared);
         }
-        let post = diesel::update(posts::table.find(post_id))
-            .set((
-                posts::title.eq(title),
-                posts::body.eq(body),
-                posts::updated_at.eq(Utc::now()),
-            ))
-            .returning(Post::as_returning())
-            .get_result::<Post>(connection)?;
-        Ok(PostUpdate::Updated(post))
+        let post = if let Some((title, body)) = content {
+            diesel::update(posts::table.find(post_id))
+                .set((
+                    posts::title.eq(title),
+                    posts::body.eq(body),
+                    posts::updated_at.eq(Utc::now()),
+                ))
+                .returning(Post::as_returning())
+                .get_result::<Post>(connection)?
+        } else {
+            diesel::update(posts::table.find(post_id))
+                .set(posts::updated_at.eq(Utc::now()))
+                .returning(Post::as_returning())
+                .get_result::<Post>(connection)?
+        };
+        if let Some(names) = tag_names {
+            replace_post_tags(connection, post_id, names)?;
+        }
+        Ok(PostUpdate::Updated(tagged_post(connection, post)?))
     })
 }
 
@@ -357,6 +403,7 @@ pub async fn share_post(
 pub async fn list_posts(
     pool: web::Data<DbPool>,
     request: HttpRequest,
+    query: web::Query<PostListQuery>,
 ) -> actix_web::Result<HttpResponse> {
     let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
         return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
@@ -364,12 +411,15 @@ pub async fn list_posts(
         })));
     };
 
+    let topic = match query.tag.as_deref().map(normalize_tag).transpose() {
+        Ok(topic) => topic,
+        Err(error) => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": error })));
+        }
+    };
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        visible_posts(user_id)
-            .order((posts::created_at.desc(), posts::id.desc()))
-            .select(Post::as_select())
-            .load::<Post>(&mut connection)
+        visible_tagged_posts(&mut connection, user_id, topic.as_deref())
             .map_err(|error| error.to_string())
     })
     .await
@@ -410,7 +460,7 @@ pub async fn get_post(
                     .count()
                     .get_result::<i64>(connection)?;
                 Ok(Some(PostDetail {
-                    post,
+                    post: tagged_post(connection, post)?,
                     votes,
                     comment_count,
                 }))
@@ -445,17 +495,16 @@ pub async fn create_post(
     }
     let title = input.title.trim().to_owned();
     let body = input.body.trim().to_owned();
+    let tag_names = match normalize_tags(input.tags.as_deref().unwrap_or_default()) {
+        Ok(names) => names,
+        Err(error) => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": error })));
+        }
+    };
 
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        diesel::insert_into(posts::table)
-            .values(NewPost {
-                author_id: user_id,
-                title: &title,
-                body: &body,
-            })
-            .returning(Post::as_returning())
-            .get_result::<Post>(&mut connection)
+        create_owned_post(&mut connection, user_id, &title, &body, &tag_names)
             .map_err(|error| error.to_string())
     })
     .await
@@ -483,26 +532,71 @@ pub async fn update_post(
     let post_id = post_id.into_inner();
     let title = input.title.trim().to_owned();
     let body = input.body.trim().to_owned();
+    let tag_names = match input.tags.as_deref().map(normalize_tags).transpose() {
+        Ok(names) => names,
+        Err(error) => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": error })));
+        }
+    };
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        edit_owned_post(&mut connection, post_id, user_id, &title, &body)
-            .map_err(|error| error.to_string())
+        edit_owned_post(
+            &mut connection,
+            post_id,
+            user_id,
+            Some((&title, &body)),
+            tag_names.as_deref(),
+        )
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(actix_web::error::ErrorInternalServerError)?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
+    Ok(post_update_response(result))
+}
+
+fn post_update_response(result: PostUpdate) -> HttpResponse {
     match result {
-        PostUpdate::Updated(post) => Ok(HttpResponse::Ok().json(post)),
-        PostUpdate::Shared => Ok(HttpResponse::Conflict().json(serde_json::json!({
-            "error": "Shared posts cannot be edited. You can still delete your post."
-        }))),
-        PostUpdate::NotFound => Ok(HttpResponse::NotFound().json(serde_json::json!({
+        PostUpdate::Updated(post) => HttpResponse::Ok().json(post),
+        PostUpdate::Shared => HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Shared post content cannot be edited. You can still change topics or delete your post."
+        })),
+        PostUpdate::NotFound => HttpResponse::NotFound().json(serde_json::json!({
             "error": "Post not found."
-        }))),
+        })),
     }
 }
 
+#[put("/api/posts/{id}/tags")]
+pub async fn update_post_tags(
+    pool: web::Data<DbPool>,
+    request: HttpRequest,
+    post_id: web::Path<i64>,
+    input: web::Json<PostTagsInput>,
+) -> actix_web::Result<HttpResponse> {
+    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Sign in to edit topics."
+        })));
+    };
+    let names = match normalize_tags(&input.tags) {
+        Ok(names) => names,
+        Err(error) => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": error })));
+        }
+    };
+    let post_id = post_id.into_inner();
+    let result = web::block(move || {
+        let mut connection = pool.get().map_err(|error| error.to_string())?;
+        edit_owned_post(&mut connection, post_id, user_id, None, Some(&names))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    Ok(post_update_response(result))
+}
 #[delete("/api/posts/{id}")]
 pub async fn delete_post(
     pool: web::Data<DbPool>,
@@ -540,6 +634,113 @@ mod tests {
 
     #[test]
     #[ignore = "requires TEST_DATABASE_URL; all fixtures are rolled back"]
+    fn topics_are_deduplicated_access_filtered_and_locked_after_sharing() {
+        use crate::tags::visible_topics;
+        let url = std::env::var("TEST_DATABASE_URL").expect("set TEST_DATABASE_URL");
+        let mut connection = PgConnection::establish(&url).expect("connect to test database");
+        connection.test_transaction::<(), diesel::result::Error, _>(|connection| {
+            let suffix = Utc::now().timestamp_nanos_opt().unwrap().to_string();
+            let mut ids = Vec::new();
+            for name in ["topicowner", "topicrecipient", "topicoutsider"] {
+                ids.push(
+                    diesel::insert_into(users::table)
+                        .values((
+                            users::email.eq(format!("{name}-{suffix}@example.com")),
+                            users::username.eq(format!("{name}-{suffix}")),
+                        ))
+                        .returning(users::id)
+                        .get_result::<i64>(connection)?,
+                );
+            }
+            let (owner, recipient, outsider) = (ids[0], ids[1], ids[2]);
+            let names = normalize_tags(&["Office News".to_owned(), "office-news".to_owned(), "Rumors".to_owned()]).unwrap();
+            let tagged = create_owned_post(connection, owner, "Tagged", "Content", &names)?;
+            assert_eq!(tagged.tags.len(), 2);
+            assert_eq!(tagged.tags[0].name, "office news");
+            assert_eq!(tagged.tags[0].slug, "office-news");
+            let mut hidden_names = names.clone();
+            hidden_names.push("private only".to_owned());
+            let second = create_owned_post(connection, outsider, "Hidden", "Private", &hidden_names)?;
+            assert_eq!(tagged.tags[0].id, second.tags[0].id);
+            assert_eq!(tagged.tags[1].id, second.tags[2].id);
+            let untagged = create_owned_post(connection, owner, "Untagged", "Content", &[])?;
+            assert!(untagged.tags.is_empty());
+            assert_eq!(visible_tagged_posts(connection, owner, None)?.len(), 2);
+            assert!(!crate::tags::visible_topics(connection, owner)?.iter().any(|tag| tag.name == "private only"));
+            let filtered = visible_tagged_posts(connection, owner, Some("office news"))?;
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].post.id, tagged.post.id);
+            assert!(visible_tagged_posts(connection, recipient, Some("office news"))?.is_empty());
+            assert!(visible_topics(connection, recipient)?.is_empty());
+            assert!(visible_tagged_posts(connection, owner, Some("unknown"))?.is_empty());
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, recipient, None, Some(&[]))?,
+                PostUpdate::NotFound
+            ));
+            let replacements = normalize_tags(&["Relationships".to_owned()]).unwrap();
+            let updated = match edit_owned_post(connection, tagged.post.id, owner, None, Some(&replacements))? {
+                PostUpdate::Updated(post) => post,
+                _ => panic!("unshared topics should be editable"),
+            };
+            assert_eq!(updated.post.title, tagged.post.title);
+            assert_eq!(updated.tags[0].name, "relationships");
+            assert!(visible_tagged_posts(connection, owner, Some("office news"))?.is_empty());
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, owner, Some(("Edited", "Content")), None)?,
+                PostUpdate::Updated(post) if post.tags.len() == 1
+            ));
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, owner, None, Some(&[]))?,
+                PostUpdate::Updated(post) if post.tags.is_empty()
+            ));
+            edit_owned_post(connection, tagged.post.id, owner, None, Some(&names))?;
+            diesel::insert_into(post_shares::table)
+                .values(NewPostShare {
+                    post_id: tagged.post.id,
+                    shared_by_user_id: owner,
+                    shared_with_user_id: recipient,
+                })
+                .execute(connection)?;
+            let shared = visible_tagged_posts(connection, recipient, Some("office news"))?;
+            assert_eq!(shared.len(), 1);
+            assert_eq!(shared[0].post.id, tagged.post.id);
+            assert_eq!(visible_topics(connection, recipient)?.len(), 2);
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, owner, None, Some(&[]))?,
+                PostUpdate::Updated(post) if post.tags.is_empty()
+            ));
+            assert!(visible_topics(connection, recipient)?.is_empty());
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, recipient, None, Some(&names))?,
+                PostUpdate::NotFound
+            ));
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, owner, None, Some(&names))?,
+                PostUpdate::Updated(post) if post.tags.len() == 2 && post.post.title == "Edited"
+            ));
+            assert!(matches!(
+                edit_owned_post(connection, tagged.post.id, owner, Some(("Denied", "Denied")), Some(&[]))?,
+                PostUpdate::Shared
+            ));
+            let unchanged = posts::table.find(tagged.post.id).first::<Post>(connection)?;
+            let details = PostDetail {
+                post: tagged_post(connection, unchanged)?,
+                votes: vote_summary(connection, tagged.post.id, owner)?,
+                comment_count: 0,
+            };
+            let json = serde_json::to_value(details).unwrap();
+            assert_eq!(json["id"], tagged.post.id);
+            assert_eq!(json["tags"].as_array().unwrap().len(), 2);
+            assert_eq!(json["score"], 0);
+            assert!(json["your_vote"].is_null());
+            assert_eq!(json["comment_count"], 0);
+            assert_eq!(post_update_response(PostUpdate::Shared).status(), actix_web::http::StatusCode::CONFLICT);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[ignore = "requires TEST_DATABASE_URL; all fixtures are rolled back"]
     fn shared_posts_cannot_be_edited_but_can_be_deleted() {
         let url = std::env::var("TEST_DATABASE_URL").expect("set TEST_DATABASE_URL");
         let mut connection = PgConnection::establish(&url).expect("connect to test database");
@@ -567,14 +768,25 @@ mod tests {
                 .returning(Post::as_returning())
                 .get_result::<Post>(connection)?;
             assert!(matches!(
-                edit_owned_post(connection, post.id, recipient, "Denied", "Denied")?,
+                edit_owned_post(
+                    connection,
+                    post.id,
+                    recipient,
+                    Some(("Denied", "Denied")),
+                    None
+                )?,
                 PostUpdate::NotFound
             ));
-            let updated =
-                match edit_owned_post(connection, post.id, owner, "Edited", "Edited body")? {
-                    PostUpdate::Updated(post) => post,
-                    _ => panic!("unshared post should be editable"),
-                };
+            let updated = match edit_owned_post(
+                connection,
+                post.id,
+                owner,
+                Some(("Edited", "Edited body")),
+                None,
+            )? {
+                PostUpdate::Updated(post) => post,
+                _ => panic!("unshared post should be editable"),
+            };
             diesel::insert_into(post_shares::table)
                 .values(NewPostShare {
                     post_id: post.id,
@@ -583,15 +795,21 @@ mod tests {
                 })
                 .execute(connection)?;
             assert!(matches!(
-                edit_owned_post(connection, post.id, owner, "Denied", "Denied")?,
+                edit_owned_post(connection, post.id, owner, Some(("Denied", "Denied")), None)?,
                 PostUpdate::Shared
             ));
             let unchanged = posts::table.find(post.id).first::<Post>(connection)?;
-            assert_eq!(unchanged.title, updated.title);
-            assert_eq!(unchanged.body, updated.body);
-            assert_eq!(unchanged.updated_at, updated.updated_at);
+            assert_eq!(unchanged.title, updated.post.title);
+            assert_eq!(unchanged.body, updated.post.body);
+            assert_eq!(unchanged.updated_at, updated.post.updated_at);
             assert!(matches!(
-                edit_owned_post(connection, post.id, recipient, "Denied", "Denied")?,
+                edit_owned_post(
+                    connection,
+                    post.id,
+                    recipient,
+                    Some(("Denied", "Denied")),
+                    None
+                )?,
                 PostUpdate::NotFound
             ));
             assert_eq!(
@@ -634,26 +852,31 @@ mod tests {
         assert!(validate_post(&PostInput {
             title: "A title".to_owned(),
             body: "A story".to_owned(),
+            tags: None,
         })
         .is_ok());
         assert!(validate_post(&PostInput {
             title: "  ".to_owned(),
             body: "A story".to_owned(),
+            tags: None,
         })
         .is_err());
         assert!(validate_post(&PostInput {
             title: "x".repeat(201),
             body: "A story".to_owned(),
+            tags: None,
         })
         .is_err());
         assert!(validate_post(&PostInput {
             title: "é".repeat(200),
             body: "A story".to_owned(),
+            tags: None,
         })
         .is_ok());
         assert!(validate_post(&PostInput {
             title: "A title".to_owned(),
             body: "  ".to_owned(),
+            tags: None,
         })
         .is_err());
     }

@@ -29,7 +29,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -276,6 +277,74 @@ h1 {
 .post-list {
   display: grid;
   gap: 0.9rem;
+}
+
+.topic-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  color: #cbd5e1;
+}
+
+.topic-filter select {
+  max-width: 100%;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #475569;
+  border-radius: 0.7rem;
+  background: #0b1424;
+  color: #f8fafc;
+}
+
+.topic-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.tag-picker {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.tag-picker-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.tag-picker-input input {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.75rem;
+  border: 1px solid #475569;
+  border-radius: 0.7rem;
+  background: #0b1424;
+  color: #f8fafc;
+}
+
+.remove-topic {
+  margin-left: 0.5rem;
+  padding: 0 0.2rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.topic-label {
+  padding: 0.3rem 0.65rem;
+  border: 1px solid rgba(125, 211, 252, 0.3);
+  border-radius: 1rem;
+  background: #0c4a6e;
+  color: #bae6fd;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+button.topic-label:hover {
+  background: #075985;
 }
 
 .post-card {

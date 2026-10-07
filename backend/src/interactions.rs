@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::authenticated_user_id,
     db::DbPool,
-    models::{Comment, NewComment, NewVote, Post},
+    models::{Comment, NewComment, NewVote},
     posts::visible_posts,
     schema::{comments, posts, users, votes},
+    tags::TaggedPost,
 };
 
 #[derive(Serialize)]
@@ -19,7 +20,7 @@ pub(crate) struct VoteSummary {
 #[derive(Serialize)]
 pub(crate) struct PostDetail {
     #[serde(flatten)]
-    pub post: Post,
+    pub post: TaggedPost,
     #[serde(flatten)]
     pub votes: VoteSummary,
     pub comment_count: i64,

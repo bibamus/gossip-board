@@ -4,6 +4,7 @@ mod interactions;
 mod models;
 mod posts;
 mod schema;
+mod tags;
 
 use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
@@ -59,6 +60,7 @@ async fn main() -> std::io::Result<()> {
             .service(posts::get_post)
             .service(posts::create_post)
             .service(posts::update_post)
+            .service(posts::update_post_tags)
             .service(posts::delete_post)
             .service(posts::list_shares)
             .service(posts::search_users)
@@ -68,6 +70,8 @@ async fn main() -> std::io::Result<()> {
             .service(interactions::create_vote)
             .service(interactions::update_vote)
             .service(interactions::delete_vote)
+            .service(tags::list_tags)
+            .service(tags::create_tag)
     })
     .bind(bind_address)?
     .run()

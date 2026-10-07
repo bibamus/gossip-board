@@ -48,7 +48,7 @@ visible post with `GET /api/posts/{id}`, update their own post with
 Titles are limited to 200 characters and both fields must contain non-whitespace
 text. The list and detail endpoints include the owner’s posts and posts
 explicitly shared with the current user; only the owner can edit or delete.
-Once a post has been shared, its content cannot be edited, even by the owner.
+Once a post has been shared, its title and body cannot be edited, even by the owner.
 Edit attempts return `409`; the owner can still delete the post.
 Unauthenticated requests receive `401`, while inaccessible or missing posts
 receive `404`.
@@ -97,3 +97,34 @@ cargo test database_interactions_enforce_access_and_replace_votes -- --ignored
 ```
 
 Fixtures run inside a transaction and are rolled back.
+
+## Topic tags
+
+Create and update posts with an optional JSON `tags` array of topic names.
+Topics accept ASCII letters, numbers, spaces, and hyphens, with a maximum
+normalized length of 64 characters. Names are lowercased, whitespace and
+hyphens are collapsed into spaces, and duplicates are removed. Slugs use
+hyphens in place of spaces. Empty or invalid names return `400`.
+
+Post creation, listing, detail, and update responses include a `tags` array
+of `{ id, name, slug }`. `GET /api/posts?tag=office%20news` filters the
+current user's accessible posts by topic without exposing other posts.
+`GET /api/tags` lists topics attached to accessible posts for suggestions
+and filtering. `POST /api/tags` with JSON `name` creates or retrieves a
+normalized topic.
+`GET /api/tags?catalog=true` provides the shared topic vocabulary for
+autocomplete without returning post associations. The picker adds one topic
+at a time, creates unknown topics, and provides a remove button on each chip.
+
+`PUT /api/posts/{id}/tags` with JSON `tags` replaces the topic associations.
+Only the original owner may change its topics, including after sharing.
+Title/body edits remain blocked with `409`; inaccessible posts return `404`.
+Supplying `tags: []` clears
+topics; omitting `tags` from a post update preserves existing associations.
+Post content and topic changes are transactional.
+
+With `TEST_DATABASE_URL` set, run the transactional topic coverage with:
+
+```powershell
+cargo test topics_are_deduplicated_access_filtered_and_locked_after_sharing -- --ignored
+```
