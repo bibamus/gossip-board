@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod models;
+mod posts;
 mod schema;
 
 use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
@@ -53,6 +54,11 @@ async fn main() -> std::io::Result<()> {
             .service(auth::verify_link)
             .service(auth::current_user)
             .service(auth::logout)
+            .service(posts::list_posts)
+            .service(posts::get_post)
+            .service(posts::create_post)
+            .service(posts::update_post)
+            .service(posts::delete_post)
     })
     .bind(bind_address)?
     .run()

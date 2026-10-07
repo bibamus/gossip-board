@@ -38,3 +38,15 @@ The API provides `POST /api/auth/request-link`, `POST /api/auth/verify`,
 minutes, are single-use, and are stored only as SHA-256 hashes. Successful
 verification creates a 30-day server-side session with an HttpOnly,
 SameSite=Lax cookie.
+
+## Posts
+
+Authenticated users can create posts with `POST /api/posts` using a JSON
+`title` and `body`, list posts visible to them with `GET /api/posts`, fetch one
+visible post with `GET /api/posts/{id}`, update their own post with
+`PUT /api/posts/{id}`, and delete their own post with `DELETE /api/posts/{id}`.
+Titles are limited to 200 characters and both fields must contain non-whitespace
+text. The list and detail endpoints include the owner’s posts and posts
+explicitly shared with the current user; only the owner can edit or delete.
+Unauthenticated requests receive `401`, while inaccessible or missing posts
+receive `404`.

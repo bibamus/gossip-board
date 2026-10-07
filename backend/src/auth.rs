@@ -424,6 +424,36 @@ pub async fn current_user(pool: web::Data<DbPool>, request: HttpRequest) -> Http
     }
 }
 
+pub async fn authenticated_user_id(
+    pool: web::Data<DbPool>,
+    request: &HttpRequest,
+) -> actix_web::Result<Option<i64>> {
+    let Some(session_token) = request
+        .cookie(SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_owned())
+    else {
+        return Ok(None);
+    };
+    let hash = token_hash(&session_token);
+    let now = Utc::now();
+
+    let user_id = web::block(move || {
+        let mut connection = pool.get().map_err(|error| error.to_string())?;
+        sessions::table
+            .filter(sessions::session_hash.eq(hash))
+            .filter(sessions::expires_at.gt(now))
+            .select(sessions::user_id)
+            .first::<i64>(&mut connection)
+            .optional()
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(user_id)
+}
+
 #[post("/api/auth/logout")]
 pub async fn logout(pool: web::Data<DbPool>, request: HttpRequest) -> HttpResponse {
     if let Some(cookie) = request.cookie(SESSION_COOKIE) {

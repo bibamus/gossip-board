@@ -28,7 +28,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -162,4 +163,266 @@ h1 {
 
 .feedback.error {
   color: #fca5a5;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 0 1.25rem 4rem;
+}
+
+.dashboard {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  display: flex;
+  min-height: 5rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.brand {
+  color: #f8fafc;
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-decoration: none;
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  color: #cbd5e1;
+  font-size: 0.88rem;
+}
+
+.quiet-button,
+.back-button {
+  padding: 0.6rem 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 0.65rem;
+  background: transparent;
+  color: #cbd5e1;
+}
+
+.quiet-button:hover:not(:disabled),
+.back-button:hover {
+  border-color: #7dd3fc;
+  color: #f8fafc;
+}
+
+.dashboard-content {
+  width: min(100%, 760px);
+  margin: 4rem auto 0;
+}
+
+.dashboard-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.dashboard-heading .eyebrow {
+  margin-bottom: 0.8rem;
+}
+
+.dashboard-heading h1 {
+  font-size: clamp(2.3rem, 7vw, 3.5rem);
+}
+
+.primary-button,
+.secondary-button,
+.danger-button {
+  min-height: 2.9rem;
+  padding: 0.7rem 1rem;
+  border: 0;
+  border-radius: 0.7rem;
+  color: #fff;
+  font-weight: 700;
+  transition: background 150ms ease;
+}
+
+.primary-button {
+  background: #0284c7;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: #0369a1;
+}
+
+.secondary-button {
+  margin: 0;
+  background: #334155;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: #475569;
+}
+
+.danger-button {
+  background: #9f1239;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #be123c;
+}
+
+.post-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.post-card {
+  display: grid;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 1.35rem 1.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 1rem;
+  background: rgba(15, 23, 42, 0.78);
+  color: #f8fafc;
+  text-align: left;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.post-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(125, 211, 252, 0.7);
+}
+
+.post-card strong {
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+}
+
+.post-meta {
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+
+.post-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #cbd5e1;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.post-form,
+.post-detail,
+.empty-state {
+  padding: clamp(1.25rem, 5vw, 2rem);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 1rem;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.post-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.post-form label {
+  margin-top: 0.4rem;
+  color: #e2e8f0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.post-form input,
+.post-form textarea {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border: 1px solid #475569;
+  border-radius: 0.7rem;
+  outline: none;
+  background: #0b1424;
+  color: #f8fafc;
+  resize: vertical;
+}
+
+.post-form input:focus,
+.post-form textarea:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.post-detail .back-button {
+  margin-bottom: 2rem;
+}
+
+.post-detail h2,
+.empty-state h2 {
+  margin: 0.75rem 0 1.25rem;
+  color: #f8fafc;
+  font-size: clamp(1.7rem, 5vw, 2.4rem);
+  letter-spacing: -0.04em;
+}
+
+.post-body {
+  color: #e2e8f0;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detail-actions {
+  margin-top: 2rem;
+}
+
+.empty-state {
+  color: #cbd5e1;
+  text-align: center;
+}
+
+.empty-state p {
+  margin: 0 0 1.5rem;
+}
+
+.empty-state h2 {
+  margin-top: 0.25rem;
+  font-size: 1.7rem;
+}
+
+@media (max-width: 560px) {
+  .app-shell {
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+
+  .dashboard-header {
+    min-height: 4.5rem;
+  }
+
+  .account {
+    gap: 0.5rem;
+  }
+
+  .account span {
+    display: none;
+  }
+
+  .dashboard-content {
+    margin-top: 2.5rem;
+  }
+
+  .dashboard-heading {
+    align-items: start;
+    flex-direction: column;
+  }
 }
