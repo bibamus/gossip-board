@@ -46,7 +46,7 @@ Docker network.
 ## Published images
 
 The GitHub Actions workflow builds both images on pull requests to `main`
-without pushing. Pushes to `main` publish `latest` and `sha-<commit>` tags to
+without pushing. Pushes to `main` publish `main`, `latest`, and `sha-<commit>` tags to
 GitHub Container Registry:
 
 ```text
