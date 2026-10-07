@@ -62,6 +62,7 @@ struct AuthUser {
     id: i64,
     email: String,
     username: String,
+    needs_username: bool,
     is_admin: bool,
 }
 
@@ -72,6 +73,7 @@ impl From<User> for AuthUser {
             id: user.id,
             email: user.email,
             username: user.username,
+            needs_username: !user.username_set,
             is_admin,
         }
     }
@@ -288,6 +290,7 @@ pub async fn request_link(
                     .values(NewUser {
                         email: &email_for_db,
                         username: &username_for_db,
+                        username_set: false,
                     })
                     .on_conflict_do_nothing()
                     .execute(connection)?;
@@ -460,7 +463,9 @@ pub async fn update_username(
     request: HttpRequest,
     input: web::Json<UpdateUsername>,
 ) -> actix_web::Result<HttpResponse> {
-    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+    let Some(user_id) =
+        authenticated_user_id_with_username_state(pool.clone(), &request, None).await?
+    else {
         return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "Sign in to change your username."
         })));
@@ -476,7 +481,7 @@ pub async fn update_username(
         let mut connection = pool.get().map_err(|error| error.to_string())?;
         Ok::<_, String>(
             diesel::update(users::table.find(user_id))
-                .set(users::username.eq(username))
+                .set((users::username.eq(username), users::username_set.eq(true)))
                 .get_result::<User>(&mut connection),
         )
     })
@@ -502,7 +507,9 @@ pub async fn delete_account(
     pool: web::Data<DbPool>,
     request: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
-    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+    let Some(user_id) =
+        authenticated_user_id_with_username_state(pool.clone(), &request, None).await?
+    else {
         return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "Sign in to delete your account."
         })));
@@ -535,6 +542,14 @@ pub async fn authenticated_user_id(
     pool: web::Data<DbPool>,
     request: &HttpRequest,
 ) -> actix_web::Result<Option<i64>> {
+    authenticated_user_id_with_username_state(pool, request, Some(true)).await
+}
+
+async fn authenticated_user_id_with_username_state(
+    pool: web::Data<DbPool>,
+    request: &HttpRequest,
+    username_set: Option<bool>,
+) -> actix_web::Result<Option<i64>> {
     let Some(session_token) = request
         .cookie(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned())
@@ -546,9 +561,15 @@ pub async fn authenticated_user_id(
 
     let user_id = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        sessions::table
+        let mut query = sessions::table
+            .inner_join(users::table)
             .filter(sessions::session_hash.eq(hash))
             .filter(sessions::expires_at.gt(now))
+            .into_boxed();
+        if let Some(username_set) = username_set {
+            query = query.filter(users::username_set.eq(username_set));
+        }
+        query
             .select(sessions::user_id)
             .first::<i64>(&mut connection)
             .optional()

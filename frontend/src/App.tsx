@@ -14,6 +14,7 @@ type User = {
   id: number
   email: string
   username: string
+  needs_username: boolean
   is_admin: boolean
 }
 
@@ -155,7 +156,12 @@ export default function App() {
           if (!response.ok) throw new Error(await readError(response))
           const result = await response.json() as AuthResponse
           setUser(result.user)
-          setNotice('You are signed in.')
+          if (result.user.needs_username) {
+            setUsernameDraft('')
+            setNotice('')
+          } else {
+            setNotice('You are signed in.')
+          }
         })
         .catch((reason: unknown) => {
           setError(reason instanceof Error ? reason.message : 'Unable to sign in with that link.')
@@ -169,6 +175,7 @@ export default function App() {
         if (response.ok) {
           const result = await response.json() as AuthResponse
           setUser(result.user)
+          if (result.user.needs_username) setUsernameDraft('')
         } else if (response.status !== 401) {
           throw new Error(await readError(response))
         }
@@ -180,7 +187,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!user) {
+    if (!user || user.needs_username) {
       setPosts([])
       setSelectedPost(null)
       return
@@ -243,7 +250,7 @@ export default function App() {
   }, [adminOpen, adminRefresh, user])
 
   useEffect(() => {
-    if (!user) {
+    if (!user || user.needs_username) {
       setTopics([])
       setTopicFilter('')
       return
@@ -631,7 +638,7 @@ export default function App() {
   const isEditing = editingPost !== undefined
 
   return (
-    <main className={user ? 'app-shell' : 'shell'}>
+    <main className={user && !user.needs_username ? 'app-shell' : 'shell'}>
       {!user ? (
         <section className="card" aria-labelledby="page-title">
           <p className="eyebrow">Gossip Board</p>
@@ -673,6 +680,42 @@ export default function App() {
           </div>
           {loading && <p className="feedback" role="status">Checking your sign-in…</p>}
           {notice && !loading && <p className="feedback success" role="status">{notice}</p>}
+          {error && <p className="feedback error" role="alert">{error}</p>}
+        </section>
+      ) : user.needs_username ? (
+        <section className="card" aria-labelledby="page-title">
+          <p className="eyebrow">Gossip Board</p>
+          <div className="auth-content">
+            <h1 id="page-title">Choose your username.</h1>
+            <p className="subtitle">
+              Pick a username so other people can find you when sharing posts.
+            </p>
+            <form className="login-form" onSubmit={updateUsername}>
+              <label htmlFor="first-username">Username</label>
+              <input
+                id="first-username"
+                type="text"
+                required
+                maxLength={50}
+                autoComplete="username"
+                autoFocus
+                value={usernameDraft}
+                onChange={(event) => setUsernameDraft(event.target.value)}
+                placeholder="your-username"
+                disabled={submitting}
+              />
+              <p className="settings-hint">
+                Use up to 50 letters, numbers, dots, hyphens, or underscores.
+              </p>
+              <button type="submit" disabled={submitting}>
+                {submitting ? 'Saving…' : 'Set username'}
+              </button>
+              <button className="text-button" type="button" onClick={() => void logout()} disabled={submitting}>
+                Sign out
+              </button>
+            </form>
+          </div>
+          {notice && <p className="feedback success" role="status">{notice}</p>}
           {error && <p className="feedback error" role="alert">{error}</p>}
         </section>
       ) : (

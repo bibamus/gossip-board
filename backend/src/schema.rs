@@ -3,6 +3,7 @@ diesel::table! {
         id -> BigInt,
         email -> Varchar,
         username -> Varchar,
+        username_set -> Bool,
         created_at -> Timestamptz,
         last_login_at -> Nullable<Timestamptz>,
     }
