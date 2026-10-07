@@ -1,3 +1,4 @@
+mod admin;
 mod auth;
 mod db;
 mod interactions;
@@ -59,6 +60,7 @@ async fn main() -> std::io::Result<()> {
             .service(auth::update_username)
             .service(auth::delete_account)
             .service(auth::logout)
+            .service(admin::overview)
             .service(posts::list_posts)
             .service(posts::get_post)
             .service(posts::create_post)

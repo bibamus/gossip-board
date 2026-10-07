@@ -76,6 +76,7 @@ are ignored by Git and excluded from image build contexts.
 | `FRONTEND_PORT` | Published frontend port, default `3000`. |
 | `APP_BASE_URL` | Browser-facing frontend URL used in magic links, default `http://localhost:3000`. Update this when changing the port or hostname. |
 | `APP_ENV` | Default `development`; `production` requires SMTP and defaults to secure cookies. |
+| `ADMIN_EMAILS` | Optional comma-separated list of email addresses allowed to view the admin overview. |
 | `COOKIE_SECURE` | Explicit cookie security override; use secure cookies with HTTPS. |
 | `SMTP_HOST`, `SMTP_FROM` | SMTP server and sender address. |
 | `SMTP_PORT` | SMTP port, default `587`. |

@@ -279,6 +279,72 @@ h1 {
   gap: 0.9rem;
 }
 
+.admin-stat {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  border: 1px solid rgba(125, 211, 252, 0.3);
+  border-radius: 1rem;
+  background: rgba(12, 74, 110, 0.32);
+}
+
+.admin-stat .eyebrow {
+  margin: 0;
+}
+
+.admin-stat strong {
+  color: #f8fafc;
+  font-size: 2.5rem;
+  line-height: 1;
+}
+
+.admin-users {
+  padding: clamp(1.25rem, 5vw, 2rem);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 1rem;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.admin-users h2 {
+  margin: 0 0 1.25rem;
+  color: #f8fafc;
+  font-size: 1.35rem;
+}
+
+.admin-table-wrap {
+  overflow-x: auto;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 0.85rem 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  vertical-align: top;
+}
+
+.admin-table th {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.admin-table td {
+  color: #e2e8f0;
+  overflow-wrap: anywhere;
+}
+
+.admin-table tr:last-child td {
+  border-bottom: 0;
+}
+
 .topic-filter {
   display: flex;
   flex-wrap: wrap;

@@ -14,10 +14,21 @@ type User = {
   id: number
   email: string
   username: string
+  is_admin: boolean
 }
 
 type AuthResponse = {
   user: User
+}
+
+type AdminOverview = {
+  users: {
+    id: number
+    email: string
+    username: string
+    created_at: string
+  }[]
+  post_count: number
 }
 
 type Post = {
@@ -119,6 +130,10 @@ export default function App() {
   const [editingPost, setEditingPost] = useState<Post | null | undefined>(undefined)
   const [draft, setDraft] = useState<PostDraft>({ title: '', body: '', tags: [], imageData: '' })
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [adminOpen, setAdminOpen] = useState(false)
+  const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null)
+  const [adminLoading, setAdminLoading] = useState(false)
+  const [adminRefresh, setAdminRefresh] = useState(0)
   const [usernameDraft, setUsernameDraft] = useState('')
   const authCheckStarted = useRef(false)
 
@@ -195,6 +210,36 @@ export default function App() {
       cancelled = true
     }
   }, [user, feedRefresh, topicFilter])
+
+  useEffect(() => {
+    if (!adminOpen || !user?.is_admin) {
+      setAdminOverview(null)
+      return
+    }
+
+    let cancelled = false
+    setAdminLoading(true)
+    void fetch('/api/admin/overview', { credentials: 'same-origin' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await readError(response))
+        return response.json() as Promise<AdminOverview>
+      })
+      .then((result) => {
+        if (!cancelled) setAdminOverview(result)
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : 'Unable to load the admin overview.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAdminLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [adminOpen, adminRefresh, user])
 
   useEffect(() => {
     if (!user) {
@@ -333,6 +378,7 @@ export default function App() {
       setSent(false)
       setEditingPost(undefined)
       setSettingsOpen(false)
+      setAdminOpen(false)
       setNotice('You have been signed out.')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to sign out.')
@@ -344,6 +390,7 @@ export default function App() {
   function toggleSettings() {
     if (!settingsOpen && user) setUsernameDraft(user.username)
     setSettingsOpen((current) => !current)
+    setAdminOpen(false)
     setError('')
     setNotice('')
     setSelectedPost(null)
@@ -390,6 +437,7 @@ export default function App() {
       if (!response.ok) throw new Error(await readError(response))
       setUser(null)
       setSettingsOpen(false)
+      setAdminOpen(false)
       setSent(false)
       setNotice('')
     } catch (reason) {
@@ -608,11 +656,28 @@ export default function App() {
               setSelectedPost(null)
               setEditingPost(undefined)
               setSettingsOpen(false)
+              setAdminOpen(false)
               setNotice('')
             }}>Gossip Board</a>
             <div className="account">
               <span className="account-username">@{user.username}</span>
               <span className="account-email">{user.email}</span>
+              {user.is_admin && (
+                <button
+                  className="quiet-button"
+                  onClick={() => {
+                    setAdminOpen((current) => !current)
+                    setSettingsOpen(false)
+                    setSelectedPost(null)
+                    setEditingPost(undefined)
+                    setError('')
+                    setNotice('')
+                  }}
+                  disabled={submitting}
+                >
+                  {adminOpen ? 'Back to board' : 'Admin overview'}
+                </button>
+              )}
               <button className="quiet-button" onClick={toggleSettings} disabled={submitting}>
                 {settingsOpen ? 'Back to board' : 'Account settings'}
               </button>
@@ -665,6 +730,64 @@ export default function App() {
                     Delete my account
                   </button>
                 </section>
+              </>
+            ) : adminOpen ? (
+              <>
+                <div className="dashboard-heading">
+                  <div>
+                    <p className="eyebrow">Administration</p>
+                    <h1 id="page-title">Admin overview</h1>
+                  </div>
+                  <button
+                    className="quiet-button"
+                    onClick={() => {
+                      setError('')
+                      setAdminRefresh((current) => current + 1)
+                    }}
+                    disabled={adminLoading}
+                  >
+                    {adminLoading ? 'Refreshing…' : 'Refresh'}
+                  </button>
+                </div>
+                {adminLoading && !adminOverview ? (
+                  <p className="empty-state" role="status">Loading admin overview…</p>
+                ) : adminOverview ? (
+                  <>
+                    <div className="admin-stat">
+                      <span className="eyebrow">All posts</span>
+                      <strong>{adminOverview.post_count.toLocaleString()}</strong>
+                    </div>
+                    <section className="admin-users" aria-labelledby="admin-users-title">
+                      <h2 id="admin-users-title">Users ({adminOverview.users.length})</h2>
+                      {adminOverview.users.length === 0 ? (
+                        <p className="post-meta">There are no users yet.</p>
+                      ) : (
+                        <div className="admin-table-wrap">
+                          <table className="admin-table">
+                            <thead>
+                              <tr>
+                                <th scope="col">Username</th>
+                                <th scope="col">Email</th>
+                                <th scope="col">Joined</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {adminOverview.users.map((adminUser) => (
+                                <tr key={adminUser.id}>
+                                  <td>@{adminUser.username}</td>
+                                  <td>{adminUser.email}</td>
+                                  <td>{formatDate(adminUser.created_at)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+                  </>
+                ) : (
+                  <p className="empty-state">The admin overview could not be loaded.</p>
+                )}
               </>
             ) : (
               <>

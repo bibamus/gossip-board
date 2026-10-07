@@ -62,16 +62,28 @@ struct AuthUser {
     id: i64,
     email: String,
     username: String,
+    is_admin: bool,
 }
 
 impl From<User> for AuthUser {
     fn from(user: User) -> Self {
+        let is_admin = is_admin_email(&user.email);
         Self {
             id: user.id,
             email: user.email,
             username: user.username,
+            is_admin,
         }
     }
+}
+
+pub(crate) fn is_admin_email(email: &str) -> bool {
+    std::env::var("ADMIN_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .any(|configured| {
+            !configured.trim().is_empty() && configured.trim().eq_ignore_ascii_case(email)
+        })
 }
 
 #[derive(Serialize)]
