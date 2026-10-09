@@ -194,10 +194,6 @@ fn edit_owned_post(
                     posts::updated_at.eq(Utc::now()),
                 ))
                 .execute(connection)?;
-        } else {
-            diesel::update(posts::table.find(post_id))
-                .set(posts::updated_at.eq(Utc::now()))
-                .execute(connection)?;
         }
         if let Some(names) = tag_names {
             replace_post_tags(connection, post_id, names)?;
@@ -726,6 +722,7 @@ mod tests {
                 _ => panic!("unshared topics should be editable"),
             };
             assert_eq!(updated.post.title, tagged.post.title);
+            assert_eq!(updated.post.updated_at, tagged.post.updated_at);
             assert_eq!(updated.tags[0].name, "relationships");
             assert!(visible_tagged_posts(connection, owner, Some("office news"))?.is_empty());
             assert!(matches!(
