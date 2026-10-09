@@ -1017,7 +1017,7 @@ export default function App() {
                 )}
                 {selectedPost.author_id === user.id && (
                   <TagPicker
-                    key={selectedPost.id}
+                    key={`topics-${selectedPost.id}`}
                     value={selectedPost.tags}
                     suggestions={topics}
                     onChange={updateTopics}
@@ -1025,7 +1025,7 @@ export default function App() {
                     disabled={submitting}
                   />
                 )}
-                {selectedPost.tags.length > 0 && (
+                {selectedPost.author_id !== user.id && selectedPost.tags.length > 0 && (
                   <div className="topic-labels" aria-label="Topics">
                     {selectedPost.tags.map((tag) => (
                       <button
@@ -1043,7 +1043,7 @@ export default function App() {
                   </div>
                 )}
                 <p className="post-body">{selectedPost.body}</p>
-                <PostInteractions key={selectedPost.id} postId={selectedPost.id} />
+                <PostInteractions key={`discussion-${selectedPost.id}`} postId={selectedPost.id} />
                 {selectedPost.author_id === user.id && (
                   <div className="form-actions detail-actions">
                     {sharesLoadedPostId === selectedPost.id && shares.length === 0 && (
