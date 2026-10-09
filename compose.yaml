@@ -25,6 +25,8 @@ services:
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       APP_ENV: ${APP_ENV:-development}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      # The backend is only reachable through Nginx, which overwrites X-Real-IP.
+      TRUST_PROXY_HEADERS: "true"
       BIND_ADDRESS: 0.0.0.0:8080
     depends_on:
       db:

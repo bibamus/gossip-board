@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use actix_web::{
     cookie::{Cookie, SameSite},
-    delete, get, post, put, web, HttpRequest, HttpResponse, Responder,
+    delete, get, post, put, web, HttpRequest, HttpResponse,
 };
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
@@ -17,12 +17,20 @@ use sha2::{Digest, Sha256};
 use crate::{
     db::DbPool,
     models::{NewUser, User},
-    schema::{magic_link_tokens, sessions, users},
+    rate_limit::{client_ip, RateLimiter},
+    schema::{magic_link_tokens, pending_signups, sessions, users},
 };
 
 const MAGIC_LINK_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const SESSION_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const PENDING_SIGNUP_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const SESSION_COOKIE: &str = "gossip_session";
+const SIGNUP_COOKIE: &str = "gossip_signup";
+/// Unexpired links per email. Tokens are only purged after expiry, so this is a
+/// limit per `MAGIC_LINK_LIFETIME` window.
+const LINKS_PER_EMAIL: usize = 3;
+pub(crate) const LINKS_PER_IP: usize = 10;
+pub(crate) const LINK_RATE_WINDOW: Duration = MAGIC_LINK_LIFETIME;
 
 #[derive(Debug, PartialEq)]
 enum SmtpTls {
@@ -53,7 +61,7 @@ pub struct VerifyLink {
 }
 
 #[derive(Deserialize)]
-pub struct UpdateUsername {
+pub struct UsernameInput {
     username: String,
 }
 
@@ -62,7 +70,6 @@ struct AuthUser {
     id: i64,
     email: String,
     username: String,
-    needs_username: bool,
     is_admin: bool,
 }
 
@@ -73,10 +80,20 @@ impl From<User> for AuthUser {
             id: user.id,
             email: user.email,
             username: user.username,
-            needs_username: !user.username_set,
             is_admin,
         }
     }
+}
+
+#[derive(Serialize)]
+struct PendingSignup {
+    email: String,
+}
+
+/// Returned instead of `AuthResponse` when a verified email has no account yet.
+#[derive(Serialize)]
+struct SignupResponse {
+    signup: PendingSignup,
 }
 
 pub(crate) fn is_admin_email(email: &str) -> bool {
@@ -240,93 +257,202 @@ fn send_magic_link(email: &str, link: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn auth_cookie(name: &'static str, value: String, lifetime: Duration) -> Cookie<'static> {
+    let mut cookie = Cookie::build(name, value)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(actix_web::cookie::time::Duration::seconds(
+            lifetime.as_secs() as i64,
+        ));
+    if cookie_secure() {
+        cookie = cookie.secure(true);
+    }
+    cookie.finish()
+}
+
+fn expired_cookie(name: &'static str) -> Cookie<'static> {
+    auth_cookie(name, String::new(), Duration::ZERO)
+}
+
+fn cookie_hash(request: &HttpRequest, name: &str) -> Option<String> {
+    request
+        .cookie(name)
+        .map(|cookie| token_hash(cookie.value()))
+}
+
+fn expires_after(now: DateTime<Utc>, lifetime: Duration) -> DateTime<Utc> {
+    now + chrono::Duration::from_std(lifetime).expect("lifetime is within chrono's supported range")
+}
+
+fn error_response(mut builder: actix_web::HttpResponseBuilder, message: &str) -> HttpResponse {
+    builder.json(serde_json::json!({ "error": message }))
+}
+
+fn too_many_requests(retry_after: Duration, message: &str) -> HttpResponse {
+    let mut builder = HttpResponse::TooManyRequests();
+    builder.insert_header((
+        actix_web::http::header::RETRY_AFTER,
+        retry_after.as_secs().max(1).to_string(),
+    ));
+    error_response(builder, message)
+}
+
+/// Serializes concurrent work on the same email until the transaction ends.
+fn lock_email(connection: &mut PgConnection, email: &str) -> QueryResult<()> {
+    diesel::sql_query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind::<diesel::sql_types::Text, _>(email)
+        .execute(connection)?;
+    Ok(())
+}
+
+fn find_user_by_email(connection: &mut PgConnection, email: &str) -> QueryResult<Option<User>> {
+    users::table
+        .filter(
+            diesel::dsl::sql::<diesel::sql_types::Bool>("LOWER(email) = ")
+                .bind::<diesel::sql_types::Text, _>(email),
+        )
+        .select(User::as_select())
+        .first::<User>(connection)
+        .optional()
+}
+
+fn start_session(
+    connection: &mut PgConnection,
+    user_id: i64,
+    session_hash: &str,
+    now: DateTime<Utc>,
+) -> QueryResult<User> {
+    diesel::insert_into(sessions::table)
+        .values((
+            sessions::user_id.eq(user_id),
+            sessions::session_hash.eq(session_hash),
+            sessions::expires_at.eq(expires_after(now, SESSION_LIFETIME)),
+        ))
+        .execute(connection)?;
+    diesel::update(users::table.find(user_id))
+        .set(users::last_login_at.eq(Some(now)))
+        .returning(User::as_returning())
+        .get_result(connection)
+}
+
+fn session_user(
+    connection: &mut PgConnection,
+    session_hash: &str,
+    now: DateTime<Utc>,
+) -> QueryResult<Option<User>> {
+    sessions::table
+        .inner_join(users::table)
+        .filter(sessions::session_hash.eq(session_hash))
+        .filter(sessions::expires_at.gt(now))
+        .select(User::as_select())
+        .first::<User>(connection)
+        .optional()
+}
+
+fn pending_signup_email(
+    connection: &mut PgConnection,
+    signup_hash: &str,
+    now: DateTime<Utc>,
+) -> QueryResult<Option<String>> {
+    pending_signups::table
+        .filter(pending_signups::signup_hash.eq(signup_hash))
+        .filter(pending_signups::expires_at.gt(now))
+        .select(pending_signups::email)
+        .first::<String>(connection)
+        .optional()
+}
+
+enum LinkRequest {
+    Issued,
+    Limited(Duration),
+}
+
+fn issue_magic_link(
+    connection: &mut PgConnection,
+    email: &str,
+    token_hash: &str,
+    now: DateTime<Utc>,
+) -> QueryResult<LinkRequest> {
+    connection.transaction(|connection| {
+        diesel::delete(magic_link_tokens::table.filter(magic_link_tokens::expires_at.le(now)))
+            .execute(connection)?;
+        diesel::delete(sessions::table.filter(sessions::expires_at.le(now))).execute(connection)?;
+        diesel::delete(pending_signups::table.filter(pending_signups::expires_at.le(now)))
+            .execute(connection)?;
+
+        lock_email(connection, email)?;
+        let active = magic_link_tokens::table
+            .filter(magic_link_tokens::email.eq(email))
+            .filter(magic_link_tokens::expires_at.gt(now))
+            .order(magic_link_tokens::expires_at.asc())
+            .select(magic_link_tokens::expires_at)
+            .load::<DateTime<Utc>>(connection)?;
+        if active.len() >= LINKS_PER_EMAIL {
+            let retry_after = (active[0] - now).to_std().unwrap_or_default();
+            return Ok(LinkRequest::Limited(retry_after));
+        }
+
+        diesel::insert_into(magic_link_tokens::table)
+            .values((
+                magic_link_tokens::email.eq(email),
+                magic_link_tokens::token_hash.eq(token_hash),
+                magic_link_tokens::expires_at.eq(expires_after(now, MAGIC_LINK_LIFETIME)),
+            ))
+            .execute(connection)?;
+        Ok(LinkRequest::Issued)
+    })
+}
+
 #[post("/api/auth/request-link")]
 pub async fn request_link(
     pool: web::Data<DbPool>,
+    limiter: web::Data<RateLimiter>,
+    request: HttpRequest,
     body: web::Json<RequestLink>,
-) -> actix_web::Result<impl Responder> {
+) -> actix_web::Result<HttpResponse> {
+    if let Some(ip) = client_ip(&request) {
+        if let Err(retry_after) = limiter.check(&ip) {
+            return Ok(too_many_requests(
+                retry_after,
+                "Too many sign-in links were requested. Try again later.",
+            ));
+        }
+    }
+
     let email = body.email.trim().to_ascii_lowercase();
     if !valid_email(&email) {
-        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Enter a valid email address."
-        })));
+        return Ok(error_response(
+            HttpResponse::BadRequest(),
+            "Enter a valid email address.",
+        ));
     }
 
     let token = random_token();
     let hash = token_hash(&token);
     let now = Utc::now();
-    let expires_at = now
-        + chrono::Duration::from_std(MAGIC_LINK_LIFETIME)
-            .expect("magic-link lifetime is within chrono's supported range");
-    let local_part = email.split('@').next().unwrap_or("user");
-    let username = format!(
-        "{}-{}",
-        local_part
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
-            .take(38)
-            .collect::<String>(),
-        &token[..8]
-    );
     let email_for_db = email.clone();
-    let username_for_db = username;
-    let hash_for_db = hash.clone();
 
-    web::block(move || {
+    let outcome = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        connection
-            .transaction::<(), diesel::result::Error, _>(|connection| {
-                diesel::delete(
-                    magic_link_tokens::table.filter(magic_link_tokens::expires_at.le(now)),
-                )
-                .execute(connection)?;
-                diesel::delete(
-                    magic_link_tokens::table.filter(magic_link_tokens::used_at.is_not_null()),
-                )
-                .execute(connection)?;
-                diesel::delete(sessions::table.filter(sessions::expires_at.le(now)))
-                    .execute(connection)?;
-                diesel::insert_into(users::table)
-                    .values(NewUser {
-                        email: &email_for_db,
-                        username: &username_for_db,
-                        username_set: false,
-                    })
-                    .on_conflict_do_nothing()
-                    .execute(connection)?;
-                let user_id = users::table
-                    .filter(
-                        diesel::dsl::sql::<diesel::sql_types::Bool>("LOWER(email) = ")
-                            .bind::<diesel::sql_types::Text, _>(&email_for_db),
-                    )
-                    .select(users::id)
-                    .first::<i64>(connection)?;
-                diesel::delete(
-                    magic_link_tokens::table
-                        .filter(magic_link_tokens::user_id.eq(user_id))
-                        .filter(magic_link_tokens::used_at.is_null()),
-                )
-                .execute(connection)?;
-                diesel::insert_into(magic_link_tokens::table)
-                    .values((
-                        magic_link_tokens::user_id.eq(user_id),
-                        magic_link_tokens::token_hash.eq(hash_for_db),
-                        magic_link_tokens::expires_at.eq(expires_at),
-                    ))
-                    .execute(connection)?;
-                Ok(())
-            })
+        issue_magic_link(&mut connection, &email_for_db, &hash, now)
             .map_err(|error| error.to_string())
     })
     .await
     .map_err(actix_web::error::ErrorInternalServerError)?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
+    if let LinkRequest::Limited(retry_after) = outcome {
+        return Ok(too_many_requests(
+            retry_after,
+            "Too many sign-in links were requested for this email. Try again in a few minutes.",
+        ));
+    }
+
     let app_base_url =
         std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:5173".to_owned());
     let link = format!("{}/?token={token}", app_base_url.trim_end_matches('/'));
-    let email_for_send = email.clone();
-    web::block(move || send_magic_link(&email_for_send, &link))
+    web::block(move || send_magic_link(&email, &link))
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?
         .map_err(|error| {
@@ -339,121 +465,232 @@ pub async fn request_link(
     })))
 }
 
+enum VerifyOutcome {
+    SignedIn(User),
+    Signup(String),
+}
+
 #[post("/api/auth/verify")]
 pub async fn verify_link(
     pool: web::Data<DbPool>,
+    request: HttpRequest,
     body: web::Json<VerifyLink>,
-) -> actix_web::Result<impl Responder> {
+) -> actix_web::Result<HttpResponse> {
+    const INVALID_LINK: &str = "This sign-in link is invalid or has expired.";
     if body.token.len() != 64 || !body.token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "This sign-in link is invalid or has expired."
-        })));
+        return Ok(error_response(HttpResponse::BadRequest(), INVALID_LINK));
     }
 
-    let token_hash_value = token_hash(&body.token);
-    let session_token = random_token();
-    let session_hash_value = token_hash(&session_token);
+    let link_hash = token_hash(&body.token);
+    // Becomes either the session token or the pending sign-up token.
+    let new_token = random_token();
+    let new_hash = token_hash(&new_token);
+    let previous_session = cookie_hash(&request, SESSION_COOKIE);
+    let previous_signup = cookie_hash(&request, SIGNUP_COOKIE);
     let now = Utc::now();
-    let session_expires_at = now
-        + chrono::Duration::from_std(SESSION_LIFETIME)
-            .expect("session lifetime is within chrono's supported range");
-    let hash_for_db = token_hash_value.clone();
 
-    let user = web::block(move || {
+    let outcome = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        let result = connection.transaction::<User, diesel::result::Error, _>(|connection| {
-            let (token_id, user_id) = magic_link_tokens::table
-                .filter(magic_link_tokens::token_hash.eq(hash_for_db))
-                .filter(magic_link_tokens::used_at.is_null())
-                .filter(magic_link_tokens::expires_at.gt(now))
-                .select((magic_link_tokens::id, magic_link_tokens::user_id))
-                .for_update()
-                .first::<(i64, i64)>(connection)?;
-            diesel::update(magic_link_tokens::table.find(token_id))
-                .set(magic_link_tokens::used_at.eq(Some(now)))
-                .execute(connection)?;
-            diesel::update(users::table.find(user_id))
-                .set(users::last_login_at.eq(Some(now)))
-                .execute(connection)?;
-            diesel::insert_into(sessions::table)
-                .values((
-                    sessions::user_id.eq(user_id),
-                    sessions::session_hash.eq(session_hash_value),
-                    sessions::expires_at.eq(session_expires_at),
-                ))
-                .execute(connection)?;
-            users::table.find(user_id).first::<User>(connection)
-        });
-        Ok::<_, String>(result)
+        Ok::<_, String>(
+            connection.transaction::<_, diesel::result::Error, _>(|connection| {
+                let (token_id, email) = magic_link_tokens::table
+                    .filter(magic_link_tokens::token_hash.eq(&link_hash))
+                    .filter(magic_link_tokens::used_at.is_null())
+                    .filter(magic_link_tokens::expires_at.gt(now))
+                    .select((magic_link_tokens::id, magic_link_tokens::email))
+                    .for_update()
+                    .first::<(i64, String)>(connection)?;
+                diesel::update(magic_link_tokens::table.find(token_id))
+                    .set(magic_link_tokens::used_at.eq(Some(now)))
+                    .execute(connection)?;
+
+                // A sign-in link replaces whatever session or sign-up this browser had.
+                if let Some(hash) = &previous_session {
+                    diesel::delete(sessions::table.filter(sessions::session_hash.eq(hash)))
+                        .execute(connection)?;
+                }
+                if let Some(hash) = &previous_signup {
+                    diesel::delete(
+                        pending_signups::table.filter(pending_signups::signup_hash.eq(hash)),
+                    )
+                    .execute(connection)?;
+                }
+
+                match find_user_by_email(connection, &email)? {
+                    Some(user) => Ok(VerifyOutcome::SignedIn(start_session(
+                        connection, user.id, &new_hash, now,
+                    )?)),
+                    None => {
+                        diesel::insert_into(pending_signups::table)
+                            .values((
+                                pending_signups::email.eq(&email),
+                                pending_signups::signup_hash.eq(&new_hash),
+                                pending_signups::expires_at
+                                    .eq(expires_after(now, PENDING_SIGNUP_LIFETIME)),
+                            ))
+                            .execute(connection)?;
+                        Ok(VerifyOutcome::Signup(email))
+                    }
+                }
+            }),
+        )
     })
     .await
+    .map_err(actix_web::error::ErrorInternalServerError)?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    let user = match user {
-        Ok(Ok(user)) => user,
-        Ok(Err(diesel::result::Error::NotFound)) => {
-            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "This sign-in link is invalid or has expired."
-            })));
+    match outcome {
+        Ok(VerifyOutcome::SignedIn(user)) => Ok(HttpResponse::Ok()
+            .cookie(auth_cookie(SESSION_COOKIE, new_token, SESSION_LIFETIME))
+            .cookie(expired_cookie(SIGNUP_COOKIE))
+            .json(AuthResponse { user: user.into() })),
+        Ok(VerifyOutcome::Signup(email)) => Ok(HttpResponse::Ok()
+            .cookie(auth_cookie(
+                SIGNUP_COOKIE,
+                new_token,
+                PENDING_SIGNUP_LIFETIME,
+            ))
+            .cookie(expired_cookie(SESSION_COOKIE))
+            .json(SignupResponse {
+                signup: PendingSignup { email },
+            })),
+        Err(diesel::result::Error::NotFound) => {
+            Ok(error_response(HttpResponse::Unauthorized(), INVALID_LINK))
         }
-        Ok(Err(error)) => return Err(actix_web::error::ErrorInternalServerError(error)),
-        Err(error) => return Err(actix_web::error::ErrorInternalServerError(error)),
-    };
-
-    let mut cookie = Cookie::build(SESSION_COOKIE, session_token)
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/")
-        .max_age(actix_web::cookie::time::Duration::seconds(
-            SESSION_LIFETIME.as_secs() as i64,
-        ));
-    if cookie_secure() {
-        cookie = cookie.secure(true);
+        Err(error) => Err(actix_web::error::ErrorInternalServerError(error)),
     }
-
-    Ok(HttpResponse::Ok()
-        .cookie(cookie.finish())
-        .json(AuthResponse { user: user.into() }))
 }
 
 #[get("/api/auth/me")]
-pub async fn current_user(pool: web::Data<DbPool>, request: HttpRequest) -> HttpResponse {
-    let Some(session_token) = request
-        .cookie(SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_owned())
-    else {
-        return HttpResponse::Unauthorized().finish();
-    };
-    let hash = token_hash(&session_token);
-    let now: DateTime<Utc> = Utc::now();
+pub async fn current_user(
+    pool: web::Data<DbPool>,
+    request: HttpRequest,
+) -> actix_web::Result<HttpResponse> {
+    let session = cookie_hash(&request, SESSION_COOKIE);
+    let signup = cookie_hash(&request, SIGNUP_COOKIE);
+    if session.is_none() && signup.is_none() {
+        return Ok(HttpResponse::Unauthorized().finish());
+    }
+    let now = Utc::now();
 
-    let user = web::block(move || {
+    let (user, signup_email) = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        let result = sessions::table
-            .inner_join(users::table)
-            .filter(sessions::session_hash.eq(hash))
-            .filter(sessions::expires_at.gt(now))
-            .select(User::as_select())
-            .first::<User>(&mut connection);
-        Ok::<_, String>(result)
+        if let Some(hash) = session {
+            let user =
+                session_user(&mut connection, &hash, now).map_err(|error| error.to_string())?;
+            if user.is_some() {
+                return Ok((user, None));
+            }
+        }
+        let email = match signup {
+            Some(hash) => pending_signup_email(&mut connection, &hash, now)
+                .map_err(|error| error.to_string())?,
+            None => None,
+        };
+        Ok::<_, String>((None, email))
     })
-    .await;
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    match user {
-        Ok(Ok(Ok(user))) => HttpResponse::Ok().json(AuthResponse { user: user.into() }),
-        Ok(Ok(Err(diesel::result::Error::NotFound))) => HttpResponse::Unauthorized().finish(),
-        Ok(Ok(Err(error))) => {
-            log::error!("Failed to load authenticated user: {error}");
-            HttpResponse::InternalServerError().finish()
+    Ok(match (user, signup_email) {
+        (Some(user), _) => HttpResponse::Ok().json(AuthResponse { user: user.into() }),
+        (None, Some(email)) => HttpResponse::Ok().json(SignupResponse {
+            signup: PendingSignup { email },
+        }),
+        (None, None) => HttpResponse::Unauthorized().finish(),
+    })
+}
+
+enum SignupError {
+    Expired,
+    Database(diesel::result::Error),
+}
+
+impl From<diesel::result::Error> for SignupError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+fn create_account(
+    connection: &mut PgConnection,
+    signup_hash: &str,
+    username: &str,
+    session_hash: &str,
+    now: DateTime<Utc>,
+) -> Result<User, SignupError> {
+    connection.transaction(|connection| {
+        let email =
+            pending_signup_email(connection, signup_hash, now)?.ok_or(SignupError::Expired)?;
+        lock_email(connection, &email)?;
+        diesel::delete(pending_signups::table.filter(pending_signups::email.eq(&email)))
+            .execute(connection)?;
+        // Another browser may have completed a sign-up for this email first.
+        let user = match find_user_by_email(connection, &email)? {
+            Some(user) => user,
+            None => diesel::insert_into(users::table)
+                .values(NewUser {
+                    email: &email,
+                    username,
+                })
+                .returning(User::as_returning())
+                .get_result(connection)?,
+        };
+        Ok(start_session(connection, user.id, session_hash, now)?)
+    })
+}
+
+#[post("/api/auth/signup")]
+pub async fn complete_signup(
+    pool: web::Data<DbPool>,
+    request: HttpRequest,
+    input: web::Json<UsernameInput>,
+) -> actix_web::Result<HttpResponse> {
+    const EXPIRED: &str = "Your sign-up has expired. Request a new sign-in link.";
+    let Some(signup_hash) = cookie_hash(&request, SIGNUP_COOKIE) else {
+        return Ok(error_response(HttpResponse::Unauthorized(), EXPIRED));
+    };
+    let username = match normalize_username(&input.username) {
+        Ok(username) => username,
+        Err(error) => return Ok(error_response(HttpResponse::BadRequest(), error)),
+    };
+    let session_token = random_token();
+    let session_hash = token_hash(&session_token);
+    let now = Utc::now();
+
+    let result = web::block(move || {
+        let mut connection = pool.get().map_err(|error| error.to_string())?;
+        Ok::<_, String>(create_account(
+            &mut connection,
+            &signup_hash,
+            &username,
+            &session_hash,
+            now,
+        ))
+    })
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    match result {
+        Ok(user) => Ok(HttpResponse::Created()
+            .cookie(auth_cookie(SESSION_COOKIE, session_token, SESSION_LIFETIME))
+            .cookie(expired_cookie(SIGNUP_COOKIE))
+            .json(AuthResponse { user: user.into() })),
+        Err(SignupError::Expired) => {
+            let mut builder = HttpResponse::Unauthorized();
+            builder.cookie(expired_cookie(SIGNUP_COOKIE));
+            Ok(error_response(builder, EXPIRED))
         }
-        Ok(Err(error)) => {
-            log::error!("Failed to get a database connection: {error}");
-            HttpResponse::InternalServerError().finish()
-        }
-        Err(error) => {
-            log::error!("Failed to load authenticated user: {error}");
-            HttpResponse::InternalServerError().finish()
-        }
+        Err(SignupError::Database(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        ))) => Ok(error_response(
+            HttpResponse::Conflict(),
+            "That username is already in use.",
+        )),
+        Err(SignupError::Database(error)) => Err(actix_web::error::ErrorInternalServerError(error)),
     }
 }
 
@@ -461,27 +698,24 @@ pub async fn current_user(pool: web::Data<DbPool>, request: HttpRequest) -> Http
 pub async fn update_username(
     pool: web::Data<DbPool>,
     request: HttpRequest,
-    input: web::Json<UpdateUsername>,
+    input: web::Json<UsernameInput>,
 ) -> actix_web::Result<HttpResponse> {
-    let Some(user_id) =
-        authenticated_user_id_with_username_state(pool.clone(), &request, None).await?
-    else {
-        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Sign in to change your username."
-        })));
+    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+        return Ok(error_response(
+            HttpResponse::Unauthorized(),
+            "Sign in to change your username.",
+        ));
     };
     let username = match normalize_username(&input.username) {
         Ok(username) => username,
-        Err(error) => {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": error })));
-        }
+        Err(error) => return Ok(error_response(HttpResponse::BadRequest(), error)),
     };
 
     let result = web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
         Ok::<_, String>(
             diesel::update(users::table.find(user_id))
-                .set((users::username.eq(username), users::username_set.eq(true)))
+                .set(users::username.eq(username))
                 .get_result::<User>(&mut connection),
         )
     })
@@ -494,9 +728,10 @@ pub async fn update_username(
         Ok(Err(diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation,
             _,
-        ))) => Ok(HttpResponse::Conflict().json(serde_json::json!({
-            "error": "That username is already in use."
-        }))),
+        ))) => Ok(error_response(
+            HttpResponse::Conflict(),
+            "That username is already in use.",
+        )),
         Ok(Err(error)) => Err(actix_web::error::ErrorInternalServerError(error)),
         Ok(Ok(user)) => Ok(HttpResponse::Ok().json(AuthResponse { user: user.into() })),
     }
@@ -507,34 +742,25 @@ pub async fn delete_account(
     pool: web::Data<DbPool>,
     request: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
-    let Some(user_id) =
-        authenticated_user_id_with_username_state(pool.clone(), &request, None).await?
-    else {
-        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Sign in to delete your account."
-        })));
+    let Some(user_id) = authenticated_user_id(pool.clone(), &request).await? else {
+        return Ok(error_response(
+            HttpResponse::Unauthorized(),
+            "Sign in to delete your account.",
+        ));
     };
 
-    let result = web::block(move || {
+    web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
         diesel::delete(users::table.find(user_id))
             .execute(&mut connection)
             .map_err(|error| error.to_string())
     })
     .await
+    .map_err(actix_web::error::ErrorInternalServerError)?
     .map_err(actix_web::error::ErrorInternalServerError)?;
-    result.map_err(actix_web::error::ErrorInternalServerError)?;
 
-    let mut expired_cookie = Cookie::build(SESSION_COOKIE, "")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/")
-        .max_age(actix_web::cookie::time::Duration::seconds(0));
-    if cookie_secure() {
-        expired_cookie = expired_cookie.secure(true);
-    }
     Ok(HttpResponse::NoContent()
-        .cookie(expired_cookie.finish())
+        .cookie(expired_cookie(SESSION_COOKIE))
         .finish())
 }
 
@@ -542,34 +768,16 @@ pub async fn authenticated_user_id(
     pool: web::Data<DbPool>,
     request: &HttpRequest,
 ) -> actix_web::Result<Option<i64>> {
-    authenticated_user_id_with_username_state(pool, request, Some(true)).await
-}
-
-async fn authenticated_user_id_with_username_state(
-    pool: web::Data<DbPool>,
-    request: &HttpRequest,
-    username_set: Option<bool>,
-) -> actix_web::Result<Option<i64>> {
-    let Some(session_token) = request
-        .cookie(SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_owned())
-    else {
+    let Some(hash) = cookie_hash(request, SESSION_COOKIE) else {
         return Ok(None);
     };
-    let hash = token_hash(&session_token);
     let now = Utc::now();
 
-    let user_id = web::block(move || {
+    web::block(move || {
         let mut connection = pool.get().map_err(|error| error.to_string())?;
-        let mut query = sessions::table
-            .inner_join(users::table)
+        sessions::table
             .filter(sessions::session_hash.eq(hash))
             .filter(sessions::expires_at.gt(now))
-            .into_boxed();
-        if let Some(username_set) = username_set {
-            query = query.filter(users::username_set.eq(username_set));
-        }
-        query
             .select(sessions::user_id)
             .first::<i64>(&mut connection)
             .optional()
@@ -577,25 +785,34 @@ async fn authenticated_user_id_with_username_state(
     })
     .await
     .map_err(actix_web::error::ErrorInternalServerError)?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
-
-    Ok(user_id)
+    .map_err(actix_web::error::ErrorInternalServerError)
 }
 
 #[post("/api/auth/logout")]
 pub async fn logout(pool: web::Data<DbPool>, request: HttpRequest) -> HttpResponse {
-    if let Some(cookie) = request.cookie(SESSION_COOKIE) {
-        let hash = token_hash(cookie.value());
+    let session = cookie_hash(&request, SESSION_COOKIE);
+    let signup = cookie_hash(&request, SIGNUP_COOKIE);
+    if session.is_some() || signup.is_some() {
         let result = web::block(move || {
             let mut connection = pool.get().map_err(|error| error.to_string())?;
-            diesel::delete(sessions::table.filter(sessions::session_hash.eq(hash)))
+            if let Some(hash) = session {
+                diesel::delete(sessions::table.filter(sessions::session_hash.eq(hash)))
+                    .execute(&mut connection)
+                    .map_err(|error| error.to_string())?;
+            }
+            if let Some(hash) = signup {
+                diesel::delete(
+                    pending_signups::table.filter(pending_signups::signup_hash.eq(hash)),
+                )
                 .execute(&mut connection)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            }
+            Ok::<_, String>(())
         })
         .await;
 
         match result {
-            Ok(Ok(_)) => {}
+            Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 log::error!("Failed to revoke session: {error}");
                 return HttpResponse::InternalServerError().finish();
@@ -607,15 +824,10 @@ pub async fn logout(pool: web::Data<DbPool>, request: HttpRequest) -> HttpRespon
         }
     }
 
-    let mut expired_cookie = Cookie::build(SESSION_COOKIE, "")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/")
-        .max_age(actix_web::cookie::time::Duration::seconds(0));
-    if cookie_secure() {
-        expired_cookie = expired_cookie.secure(true);
-    }
-    HttpResponse::Ok().cookie(expired_cookie.finish()).finish()
+    HttpResponse::Ok()
+        .cookie(expired_cookie(SESSION_COOKIE))
+        .cookie(expired_cookie(SIGNUP_COOKIE))
+        .finish()
 }
 
 #[cfg(test)]

@@ -14,13 +14,14 @@ type User = {
   id: number
   email: string
   username: string
-  needs_username: boolean
   is_admin: boolean
 }
 
 type AuthResponse = {
   user: User
 }
+
+type SessionResponse = AuthResponse | { signup: { email: string } }
 
 type AdminOverview = {
   users: {
@@ -107,6 +108,7 @@ function pastedImage(data: DataTransfer) {
 export default function App() {
   const [email, setEmail] = useState('')
   const [user, setUser] = useState<User | null>(null)
+  const [signupEmail, setSignupEmail] = useState<string | null>(null)
   const [sent, setSent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
@@ -154,13 +156,13 @@ export default function App() {
       })
         .then(async (response) => {
           if (!response.ok) throw new Error(await readError(response))
-          const result = await response.json() as AuthResponse
-          setUser(result.user)
-          if (result.user.needs_username) {
-            setUsernameDraft('')
-            setNotice('')
-          } else {
+          const result = await response.json() as SessionResponse
+          if ('user' in result) {
+            setUser(result.user)
             setNotice('You are signed in.')
+          } else {
+            setSignupEmail(result.signup.email)
+            setUsernameDraft('')
           }
         })
         .catch((reason: unknown) => {
@@ -173,9 +175,9 @@ export default function App() {
     void fetch('/api/auth/me', { credentials: 'same-origin' })
       .then(async (response) => {
         if (response.ok) {
-          const result = await response.json() as AuthResponse
-          setUser(result.user)
-          if (result.user.needs_username) setUsernameDraft('')
+          const result = await response.json() as SessionResponse
+          if ('user' in result) setUser(result.user)
+          else setSignupEmail(result.signup.email)
         } else if (response.status !== 401) {
           throw new Error(await readError(response))
         }
@@ -187,7 +189,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!user || user.needs_username) {
+    if (!user) {
       setPosts([])
       setSelectedPost(null)
       return
@@ -250,7 +252,7 @@ export default function App() {
   }, [adminOpen, adminRefresh, user])
 
   useEffect(() => {
-    if (!user || user.needs_username) {
+    if (!user) {
       setTopics([])
       setTopicFilter('')
       return
@@ -383,6 +385,7 @@ export default function App() {
       })
       if (!response.ok) throw new Error(await readError(response))
       setUser(null)
+      setSignupEmail(null)
       setSent(false)
       setEditingPost(undefined)
       setSettingsOpen(false)
@@ -429,6 +432,35 @@ export default function App() {
     }
   }
 
+  async function completeSignup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSubmitting(true)
+    setError('')
+    setNotice('')
+    try {
+      const response = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ username: usernameDraft }),
+      })
+      if (response.status === 401) {
+        setSignupEmail(null)
+        setSent(false)
+      }
+      if (!response.ok) throw new Error(await readError(response))
+      const result = await response.json() as AuthResponse
+      setUser(result.user)
+      setSignupEmail(null)
+      setUsernameDraft(result.user.username)
+      setNotice('Welcome to Gossip Board!')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to create your account.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function deleteAccount() {
     if (!window.confirm(
       'Permanently delete your account? Your posts, comments, votes, and shares will also be deleted. This cannot be undone.',
@@ -444,6 +476,7 @@ export default function App() {
       })
       if (!response.ok) throw new Error(await readError(response))
       setUser(null)
+      setSignupEmail(null)
       setSettingsOpen(false)
       setAdminOpen(false)
       setSent(false)
@@ -638,8 +671,8 @@ export default function App() {
   const isEditing = editingPost !== undefined
 
   return (
-    <main className={user && !user.needs_username ? 'app-shell' : 'shell'}>
-      {!user ? (
+    <main className={user ? 'app-shell' : 'shell'}>
+      {!user && !signupEmail ? (
         <section className="card" aria-labelledby="page-title">
           <p className="eyebrow">Gossip Board</p>
           <div className="auth-content">
@@ -682,15 +715,16 @@ export default function App() {
           {notice && !loading && <p className="feedback success" role="status">{notice}</p>}
           {error && <p className="feedback error" role="alert">{error}</p>}
         </section>
-      ) : user.needs_username ? (
+      ) : !user ? (
         <section className="card" aria-labelledby="page-title">
           <p className="eyebrow">Gossip Board</p>
           <div className="auth-content">
             <h1 id="page-title">Choose your username.</h1>
             <p className="subtitle">
-              Pick a username so other people can find you when sharing posts.
+              Pick a username to finish creating the account for {signupEmail}.
+              Other people use it to find you when sharing posts.
             </p>
-            <form className="login-form" onSubmit={updateUsername}>
+            <form className="login-form" onSubmit={completeSignup}>
               <label htmlFor="first-username">Username</label>
               <input
                 id="first-username"
@@ -708,7 +742,7 @@ export default function App() {
                 Use up to 50 letters, numbers, dots, hyphens, or underscores.
               </p>
               <button type="submit" disabled={submitting}>
-                {submitting ? 'Saving…' : 'Set username'}
+                {submitting ? 'Creating account…' : 'Create account'}
               </button>
               <button className="text-button" type="button" onClick={() => void logout()} disabled={submitting}>
                 Sign out

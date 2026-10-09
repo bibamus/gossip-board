@@ -3,7 +3,6 @@ diesel::table! {
         id -> BigInt,
         email -> Varchar,
         username -> Varchar,
-        username_set -> Bool,
         created_at -> Timestamptz,
         last_login_at -> Nullable<Timestamptz>,
     }
@@ -12,10 +11,20 @@ diesel::table! {
 diesel::table! {
     magic_link_tokens (id) {
         id -> BigInt,
-        user_id -> BigInt,
+        email -> Varchar,
         token_hash -> Bpchar,
         expires_at -> Timestamptz,
         used_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    pending_signups (id) {
+        id -> BigInt,
+        email -> Varchar,
+        signup_hash -> Bpchar,
+        expires_at -> Timestamptz,
         created_at -> Timestamptz,
     }
 }
@@ -88,7 +97,6 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(magic_link_tokens -> users (user_id));
 diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(posts -> users (author_id));
 diesel::joinable!(post_shares -> posts (post_id));
@@ -102,6 +110,7 @@ diesel::joinable!(post_tags -> tags (tag_id));
 diesel::allow_tables_to_appear_in_same_query!(
     comments,
     magic_link_tokens,
+    pending_signups,
     post_shares,
     post_tags,
     posts,

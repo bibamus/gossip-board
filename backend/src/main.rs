@@ -4,6 +4,7 @@ mod db;
 mod interactions;
 mod models;
 mod posts;
+mod rate_limit;
 mod schema;
 mod tags;
 
@@ -48,15 +49,21 @@ async fn main() -> std::io::Result<()> {
 
     let bind_address =
         std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let link_limiter = web::Data::new(rate_limit::RateLimiter::<std::net::IpAddr>::new(
+        auth::LINKS_PER_IP,
+        auth::LINK_RATE_WINDOW,
+    ));
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(link_limiter.clone())
             .app_data(web::JsonConfig::default().limit(5 * 1024 * 1024))
             .service(health)
             .service(auth::request_link)
             .service(auth::verify_link)
             .service(auth::current_user)
+            .service(auth::complete_signup)
             .service(auth::update_username)
             .service(auth::delete_account)
             .service(auth::logout)

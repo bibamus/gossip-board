@@ -40,12 +40,30 @@ TLS-enabled mode outside local development. TLS modes validate certificates
 and do not fall back to plaintext.
 
 The API provides `POST /api/auth/request-link`, `POST /api/auth/verify`,
-`GET /api/auth/me`, `PUT /api/auth/me` to change the current username, and
-`DELETE /api/auth/me` to delete the account. Username changes accept up to 50
+`POST /api/auth/signup`, `GET /api/auth/me`, `PUT /api/auth/me` to change the
+current username, and `DELETE /api/auth/me` to delete the account. Requesting
+a link never creates an account. Verifying a link for an email that already has
+an account starts a session and returns `{ "user": ... }`. For a new email it
+instead returns `{ "signup": { "email": ... } }` and sets a one-hour, HttpOnly
+pending sign-up cookie; the account is created only when
+`POST /api/auth/signup` is called with a JSON `username`, which also starts the
+session. While a sign-up is pending, `GET /api/auth/me` returns the same
+`signup` shape; all other endpoints treat the browser as signed out. An
+expired or missing sign-up returns `401`, and a taken username returns `409`.
+
+Sign-in link requests are rate limited. Each email can have at most three
+unexpired links (one 15-minute window), enforced in the database. Each client
+IP can request ten links per 15 minutes, tracked in memory per backend process.
+Limited requests receive `429` with a `Retry-After` header. Set
+`TRUST_PROXY_HEADERS=true` only when the backend is reachable exclusively
+through a proxy that overwrites `X-Real-IP` (as the bundled Nginx does);
+otherwise the TCP peer address is used.
+
+Usernames accept up to 50
 letters, numbers, dots, hyphens, or underscores; names are case-insensitive and
 must be unique. Deleting an account also permanently deletes its posts,
 comments, votes, and shares. `POST /api/auth/logout` revokes the current
-session. Magic links expire after 15 minutes, are single-use, and are stored
+session and any pending sign-up. Magic links expire after 15 minutes, are single-use, and are stored
 only as SHA-256 hashes. Successful verification creates a 30-day server-side
 session with an HttpOnly, SameSite=Lax cookie.
 

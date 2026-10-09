@@ -11,7 +11,6 @@ pub struct User {
     pub id: i64,
     pub email: String,
     pub username: String,
-    pub username_set: bool,
     pub created_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,
 }
@@ -21,7 +20,6 @@ pub struct User {
 pub struct NewUser<'a> {
     pub email: &'a str,
     pub username: &'a str,
-    pub username_set: bool,
 }
 
 #[derive(Debug, Queryable, Selectable, Identifiable, Associations, Serialize)]

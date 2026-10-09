@@ -83,6 +83,7 @@ are ignored by Git and excluded from image build contexts.
 | `SMTP_TLS` | `none` for local plaintext SMTP, `starttls` for required STARTTLS (usually port `587`), or `implicit` for immediate TLS (usually port `465`). Defaults to `implicit` for compatibility; configure the port explicitly for your server. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | Optional SMTP credentials; set both together. |
 | `BIND_ADDRESS` | Backend listener, default `127.0.0.1:8080` locally and `0.0.0.0:8080` in Docker. |
+| `TRUST_PROXY_HEADERS` | When `true`, sign-in rate limiting uses the client IP from `X-Real-IP`. Compose sets this because the backend is only reachable through Nginx. Leave it unset when clients can reach the backend directly. |
 
 For the existing local test database, set this in `.env`:
 
